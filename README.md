@@ -1,6 +1,6 @@
 # Bevy CI/CD
 
-供 Bevy 项目调用的 GitHub Actions 工作流。Rust 检查和 ECS 规则读取调用方的 Cargo 项目，架构发布使用调用方已经构建的静态站点。工作流移植自 [fedoraiver/demo 的 CI](https://github.com/fedoraiver/demo/tree/48bdb8b1c27c4eefb5fdb2d3d472839448f0be71/.github)。
+供 Bevy 项目调用的 GitHub Actions 工作流。Rust 检查和 ECS 规则读取调用方的 Cargo 项目，架构发布使用调用方已经构建的静态站点。
 
 示例使用发布标签 `@v1.0.0`。需要固定依赖时，将标签替换为对应的完整提交 SHA。调用方须允许使用公开的 GitHub.com Actions 工作流。[GitHub 跨仓库复用说明](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
 
@@ -98,5 +98,3 @@ jobs:
 ```
 
 发布任务从同一运行下载证明，并在部署前核对待发布提交是不是默认分支的最新提交。发布后通过公开 HTTP 地址核对证明及首页哈希。后续任务可以从 `needs.publish.outputs.page_url` 读取验证通过的地址。局部重跑使用原构建任务输出的产物名，受产物保留期限制。[GitHub Pages 官方说明](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
-
-[bevy-destruction](https://github.com/fedoraiver/bevy-destruction) 使用共享流程检查现有项目，并发布仓库内已有的架构图。
