@@ -166,6 +166,11 @@ fn project_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn seed_fixture_lock(root: &Path) {
+    let lock = project_root().join("tests/fixtures/bevy-rules/Cargo.lock");
+    fs::copy(lock, root.join("Cargo.lock")).unwrap();
+}
+
 fn check(options: &Options) -> anyhow::Result<Report> {
     let mut options = options.clone();
     options.driver = Some(PathBuf::from(env!(
@@ -465,8 +470,8 @@ fn unrelated() { Other.spawn(Marker); }
         }
         fs::write(source_path, source).unwrap();
         write(&root, "src/inactive.rs", "#[derive(UnavailableMacro)] struct Inactive;\n");
-        // 从当前项目锁文件开始离线解析，避免测试沿用上一个 Bevy 补丁版本。
-        fs::copy(project_root().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+        // 从固定的 Bevy 回归锁文件开始离线解析。
+        seed_fixture_lock(&root);
         let output = Command::new("cargo").args(["metadata", "--offline", "--format-version", "1", "--manifest-path"]).arg(root.join("Cargo.toml")).output().unwrap();
         assert!(output.status.success(), "Cannot prepare fixture lockfile: {}", String::from_utf8_lossy(&output.stderr));
         check(&Options::new(root)).map_err(|error| format!("{error:#}"))
@@ -832,8 +837,8 @@ bevy_scene = "0.20"
     );
     let unresolved = "use bevy_ecs::prelude::*;\nuse bevy_scene::prelude::*;\nmacro_rules! create { ($world:expr, $scene:expr) => { $world.spawn_scene($scene) }; }\nfn unresolved_source(world: &mut World, scene: Box<dyn Scene>) { create!(world, scene); }\npub fn outer(world: &mut World, scene: Box<dyn Scene>) { unresolved_source(world, scene); }\n";
     write(&root, "src/lib.rs", unresolved);
-    // 保留项目已锁定的撤回版本，避免冷缓存下重新选版使离线 fixture 失效。
-    fs::copy(project_root().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    // 使用与行为回归相同的已锁定 Bevy 依赖。
+    seed_fixture_lock(&root);
     let lock = Command::new("cargo")
         .args([
             "metadata",

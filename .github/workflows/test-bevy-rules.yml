@@ -61,7 +61,6 @@ jobs:
         shell: bash
         run: |
           package="$GITHUB_WORKSPACE/tests/fixtures/bevy-rules"
-          bash scripts/rustc-analysis.sh prepare "$package"
           for rule in entity-names named-fields; do
             status=0
             output=$(bash scripts/rustc-analysis.sh check --rule "$rule" --workspace "$package" --features violations 2>&1) || status=$?

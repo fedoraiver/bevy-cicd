@@ -7,6 +7,9 @@ publish = false
 [dependencies]
 bevy_ecs = { version = "=0.20.1", default-features = false }
 
+[dev-dependencies]
+bevy_scene = "=0.20.1"
+
 [features]
 extra = []
 violations = []

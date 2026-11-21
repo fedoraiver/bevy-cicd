@@ -36,6 +36,7 @@ case "${1-}" in
     exec "$CARGO_TARGET_DIR/debug/rustc-analysis" "$@"
     ;;
   test)
+    cargo fetch --locked --manifest-path "$project_root/tests/fixtures/bevy-rules/Cargo.toml"
     build_tool
     cargo fmt --manifest-path "$tool_manifest" --all -- --check
     cargo test --locked --manifest-path "$tool_manifest" --workspace -- --test-threads=1
