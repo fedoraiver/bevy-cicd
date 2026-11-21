@@ -172,7 +172,7 @@ test('unsupported methods and missing files do not return cached or writable res
 
 test('missing builds, invalid ports and occupied ports fail with actionable errors', async t => {
   const missing = fixture(t, { empty: true });
-  await assert.rejects(missing.start(), /先运行 npm run build --prefix docs\/diagrams/);
+  await assert.rejects(missing.start(), /请先运行架构维护流程/);
   const data = fixture(t), preview = await data.start(), port = preview.server.address().port;
   await assert.rejects(data.start({ port }), error => error.code === 'EADDRINUSE' && error.message.includes(String(port)) && error.message.includes('--port'));
   for (const port of [-1, 65536, '4173', 1.5, NaN]) await assert.rejects(data.start({ port }), /Invalid preview port/);

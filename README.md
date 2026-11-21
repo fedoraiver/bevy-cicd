@@ -2,7 +2,7 @@
 
 供 Bevy 项目调用的 GitHub Actions 工作流。Rust 检查和 ECS 规则读取调用方的 Cargo 项目，架构发布使用调用方已经构建的静态站点。
 
-示例使用发布标签 `@v1.0.0`。需要固定依赖时，将标签替换为对应的完整提交 SHA。调用方须允许使用公开的 GitHub.com Actions 工作流。[GitHub 跨仓库复用说明](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
+示例通过发布标签引用所需的工作流。需要固定依赖时，将标签替换为对应的完整提交 SHA。调用方须允许使用公开的 GitHub.com Actions 工作流。[GitHub 跨仓库复用说明](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
 
 ## Rust 检查
 
