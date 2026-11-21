@@ -1,3 +1,4 @@
 target/
 /tmp/
+/tools/ecs-diagrams/node_modules/
 __pycache__/

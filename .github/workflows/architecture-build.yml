@@ -1,0 +1,170 @@
+name: Generate Bevy ECS architecture
+
+on:
+  workflow_call:
+    outputs:
+      artifact-name:
+        description: The checked Pages artifact name for this generated site.
+        value: ${{ jobs.build.outputs.artifact-name }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Extract, render and validate ECS architecture
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    outputs:
+      artifact-name: ${{ env.PAGES_ARTIFACT_NAME }}
+    env:
+      BEVY_ARCHITECTURE_WORKSPACE: ${{ github.workspace }}/project
+      PAGES_ARTIFACT_NAME: architecture-pages-${{ github.run_id }}-${{ github.run_attempt }}
+      PAGES_DIR: project/tmp/ecs-architecture/pages
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      MERMAID_JOBS: '2'
+      PUPPETEER_CACHE_DIR: ${{ github.workspace }}/project/tmp/ecs-architecture/puppeteer
+      PUPPETEER_SKIP_DOWNLOAD: 'false'
+      PUPPETEER_CHROME_SKIP_DOWNLOAD: 'false'
+      PUPPETEER_CHROME_HEADLESS_SHELL_SKIP_DOWNLOAD: 'true'
+      PUPPETEER_FIREFOX_SKIP_DOWNLOAD: 'true'
+      WGPU_BACKEND: vulkan
+      WGPU_FORCE_FALLBACK_ADAPTER: '1'
+    steps:
+      - name: Check out the Bevy project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: project
+          persist-credentials: false
+
+      - name: Check out the workflow tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: bevy-cicd
+          persist-credentials: false
+
+      - name: Prepare headless display, software Vulkan and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y g++ pkg-config libx11-dev libasound2-dev libudev-dev \
+            libxkbcommon-x11-0 libwayland-dev libxkbcommon-dev xvfb xauth mesa-vulkan-drivers libvulkan1 vulkan-tools fonts-noto-cjk
+          mkdir -p project/tmp/ecs-architecture
+          xvfb-run -a vulkaninfo --summary > project/tmp/ecs-architecture/vulkan-summary.txt
+          fc-match 'Noto Sans CJK SC'
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fc-list --format '%{file}\n' | sort -u | while IFS= read -r font; do sha256sum "$font"; done > project/tmp/ecs-architecture/render-fonts.txt
+          echo "MERMAID_RENDER_CONTEXT=$(sha256sum project/tmp/ecs-architecture/render-fonts.txt | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Prepare the compiler and locked Rust dependencies
+        run: bash bevy-cicd/scripts/rustc-analysis.sh prepare "$BEVY_ARCHITECTURE_WORKSPACE"
+
+      - name: Prepare Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: bevy-cicd/tools/ecs-diagrams/package-lock.json
+
+      - name: Restore locked browser
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: project/tmp/ecs-architecture/puppeteer
+          key: ecs-browser-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bevy-cicd/tools/ecs-diagrams/package-lock.json') }}
+
+      - name: Install diagram dependencies and select locked browser
+        working-directory: bevy-cicd/tools/ecs-diagrams
+        run: |
+          npm ci --foreground-scripts
+          npm exec --yes=false -- puppeteer browsers install chrome
+          node --input-type=module -e "import puppeteer from 'puppeteer'; import fs from 'node:fs'; const browser=await puppeteer.executablePath(); if(!fs.existsSync(browser))throw new Error('Locked browser missing: '+browser); fs.appendFileSync(process.env.GITHUB_ENV, 'MERMAID_CHROMIUM_PATH='+browser+'\nMAINTENANCE_VISUAL_CHROMIUM='+browser+'\n');"
+          node --input-type=module -e "import puppeteer from 'puppeteer'; const browser=await puppeteer.launch({executablePath:await puppeteer.executablePath(),headless:true}); try {console.log(await browser.version());} finally {await browser.close();}"
+
+      - name: Restore checked geometry candidates
+        id: geometry
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: project/tmp/ecs-architecture/mermaid-build/geometry-cache
+          key: ecs-geometry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bevy-cicd/tools/ecs-diagrams/package-lock.json') }}-${{ hashFiles('bevy-cicd/tools/ecs-diagrams/src/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ecs-geometry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bevy-cicd/tools/ecs-diagrams/package-lock.json') }}-${{ hashFiles('bevy-cicd/tools/ecs-diagrams/src/**') }}-
+
+      - name: Build and validate full architecture
+        run: |
+          /usr/bin/time -v -o project/tmp/ecs-architecture/resource-time.txt \
+            xvfb-run -a npm run maintain --prefix bevy-cicd/tools/ecs-diagrams -- run > /dev/null
+
+      - name: Package and check static Pages files
+        run: |
+          npm run maintain --prefix bevy-cicd/tools/ecs-diagrams -- pack-pages
+          npm run maintain --prefix bevy-cicd/tools/ecs-diagrams -- check-pages
+          index_sha=$(sha256sum "$PAGES_DIR/index.html" | cut -d' ' -f1)
+          jq -n --arg commit "$GITHUB_SHA" --arg hash "$index_sha" \
+            '{commit: $commit, index_sha256: $hash}' > "$PAGES_DIR/bevy-cicd-build.json"
+
+      - name: Verify generation leaves tracked files unchanged
+        working-directory: project
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+
+      - name: Preserve checked geometry candidates
+        if: ${{ always() && steps.geometry.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: project/tmp/ecs-architecture/mermaid-build/geometry-cache
+          key: ${{ steps.geometry.outputs.cache-primary-key }}
+
+      - name: Summarize generation
+        if: ${{ always() }}
+        run: |
+          mkdir -p project/tmp/ecs-architecture
+          node bevy-cicd/tools/ecs-diagrams/maintain.mjs report --format markdown > project/tmp/ecs-architecture/maintenance-summary.md
+          cat project/tmp/ecs-architecture/maintenance-summary.md | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve extraction and rendering evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ecs-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 3
+          if-no-files-found: warn
+          compression-level: 1
+          path: |
+            project/tmp/ecs-architecture/maintenance/
+            project/tmp/ecs-architecture/maintenance-summary.md
+            project/tmp/ecs-architecture/compiler/analysis-summary.json
+            project/tmp/ecs-architecture/compiler/debugdump/
+            project/tmp/ecs-architecture/compiler/facts.json
+            project/tmp/ecs-architecture/compiler/runtime.json
+            project/tmp/ecs-architecture/compiler/model.json
+            project/tmp/ecs-architecture/compiler/model.calls.ndjson
+            project/tmp/ecs-architecture/vulkan-summary.txt
+            project/tmp/ecs-architecture/render-fonts.txt
+            project/tmp/ecs-architecture/resource-time.txt
+            project/tmp/ecs-architecture/routing/*-failed.json
+            project/tmp/ecs-architecture/routing/*-failed.svg
+            project/tmp/ra/r/
+
+      - name: Upload the validated Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          name: ${{ env.PAGES_ARTIFACT_NAME }}
+          path: ${{ env.PAGES_DIR }}
+          retention-days: 3
+
+      - name: Upload publication proof
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ${{ env.PAGES_ARTIFACT_NAME }}-proof
+          path: ${{ env.PAGES_DIR }}/bevy-cicd-build.json
+          if-no-files-found: error
+          retention-days: 3

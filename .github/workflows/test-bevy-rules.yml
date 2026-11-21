@@ -57,6 +57,11 @@ jobs:
         shell: bash
         run: bash scripts/rustc-analysis.sh test
 
+      - name: Validate headless Bevy schedule export
+        run: |
+          cargo fmt --manifest-path tools/bevy-schedule-export/Cargo.toml --all -- --check
+          cargo test --locked --manifest-path tools/bevy-schedule-export/Cargo.toml
+
       - name: Detect violations in a Bevy project
         shell: bash
         run: |

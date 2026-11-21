@@ -32,7 +32,7 @@ case "${1-}" in
     cd "$package"
     cargo fetch --locked
     ;;
-  check)
+  check|extract|model)
     exec "$CARGO_TARGET_DIR/debug/rustc-analysis" "$@"
     ;;
   test)
@@ -50,7 +50,7 @@ case "${1-}" in
     done
     ;;
   *)
-    echo 'Usage: rustc-analysis.sh prepare PACKAGE | check --rule RULE --workspace PACKAGE [--features LIST] | test' >&2
+    echo 'Usage: rustc-analysis.sh prepare PACKAGE | {check|extract|model} [ARGS] | test' >&2
     exit 2
     ;;
 esac

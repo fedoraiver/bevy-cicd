@@ -40,7 +40,62 @@ jobs:
 
 规则检查生产代码创建的 Bevy 实体是否具有初始名称，以及 Rust 单字段元组结构体等声明是否使用了具名字段。分析器固定使用 `nightly-2026-10-31`，调用方的 Cargo 包及其锁定依赖须能用该工具链编译。仓库回归覆盖 Bevy ECS 和 Scene 0.20.1。
 
-## 架构站点发布
+## 生成并发布 ECS 架构图
+
+把项目的 App 装配复用于 `--dump-schedules <directory>` 入口，并通过 `debugdump` feature 启用导出。下面的 Cargo 配置适用于 Bevy 0.20。合并到项目现有的 `[features]` 与 `[dependencies]`，并提交更新后的 `Cargo.lock`。
+
+```toml
+[features]
+debugdump = ["dep:bevy-schedule-export", "bevy/debug"]
+
+[dependencies]
+bevy-schedule-export = { git = "https://github.com/fedoraiver/bevy-cicd.git", tag = "v1.1.0", optional = true }
+```
+
+导出入口注册和装配项目的实际插件，调用下面的函数后退出。正常启动仍使用项目自己的运行入口。导出函数写入主世界及子世界的运行时记录和调度 DOT。
+
+```rust
+bevy_schedule_export::dump_schedules(
+    &mut app,
+    &output_directory,
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+)?;
+```
+
+在调用仓库的 **Settings → Pages** 将源设为 **GitHub Actions**。下面的工作流在 PR 中生成并校验站点，在默认分支合入后上线。将 `main` 改为项目实际的默认分支。
+
+```yaml
+name: ECS architecture
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: fedoraiver/bevy-cicd/.github/workflows/architecture-build.yml@v1.1.0
+
+  publish:
+    needs: build
+    if: ${{ github.event_name != 'pull_request' }}
+    uses: fedoraiver/bevy-cicd/.github/workflows/architecture-pages.yml@v1.1.0
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    with:
+      artifact-name: ${{ needs.build.outputs.artifact-name }}
+```
+
+构建按固定 Rust 和 Node 依赖分析调用仓库根目录的 Cargo 二进制，提取编译器事实，执行调度导出，生成并检查 ECS 可视化站点。运行证据以 `ecs-evidence-<run>-<attempt>` 产物保留。
+
+## 发布自定义架构站点
 
 在调用仓库的 **Settings → Pages** 将发布源设为 **GitHub Actions**。调用方负责运行自己的生成和校验脚本，产物根目录应包含 `index.html`。下面的示例假设 `scripts/build-architecture.sh` 生成 `tmp/site` 目录。把 `main` 改为项目默认分支，按实际项目修改生成步骤。
 

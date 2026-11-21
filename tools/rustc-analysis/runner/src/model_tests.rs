@@ -603,7 +603,7 @@ impl Fixture {
         };
         fixture.write("runtime.json", &runtime);
         fixture.write("debugdump/manifest.json",&json!({"schemaVersion":1,"sourceFingerprint":runtime.source_fingerprint,"schedules":runtime.schedules.iter().map(|schedule|json!({"id":schedule.id,"app":schedule.app,"label":schedule.label,"filename":schedule.dot_filename,"sha256":schedule.dot_sha256})).collect::<Vec<_>>()}));
-        fixture.write("facts.json", &json!({"schemaVersion":FACT_SCHEMA_VERSION,"compiler":"fixed-compiler","configuration":"same-build","workspace":fixture.root,"packages":[],"units":[unit],"runtimeSha256":digest(fs::read(fixture.root.join("runtime.json")).unwrap())}));
+        fixture.write("facts.json", &json!({"schemaVersion":FACT_SCHEMA_VERSION,"compiler":"fixed-compiler","configuration":"same-build","workspace":fixture.root,"projectUnits":["compiled-crate"],"packages":[],"units":[unit],"runtimeSha256":digest(fs::read(fixture.root.join("runtime.json")).unwrap())}));
         fixture
     }
     fn write(&self, name: &str, value: &impl serde::Serialize) {
@@ -978,9 +978,85 @@ fn type_identity_preserves_native_declaration_across_display_and_storage_project
         assert_eq!(
             object["typeIdentity"],
             json!({"declarationId":"marker-declaration","crateName":"demo",
-                "defPath":"demo::sample::Marker","local":true,"roles":["Component"]})
+                "defPath":"demo::sample::Marker","local":true,"project":true,"roles":["Component"]})
         );
     }
+}
+
+#[test]
+fn project_ownership_uses_native_units_even_when_crate_names_match() {
+    let fixture = Fixture::new();
+    let mut facts = fixture.read("facts.json");
+    let mut project: UnitFacts = serde_json::from_value(facts["units"][0].clone()).unwrap();
+    project.crate_name = "destruction_app".into();
+    project.crate_identity = "project-unit".into();
+    for declaration in &mut project.declarations {
+        declaration.crate_name = project.crate_name.clone();
+        declaration.full_name = declaration
+            .full_name
+            .replacen("demo::", "destruction_app::", 1);
+    }
+    let mut entry = project.declarations[0].clone();
+    entry.id = "entry-declaration".into();
+    entry.name = "main".into();
+    entry.full_name = "destruction_app::main".into();
+    project.declarations.push(entry);
+    project.callables.push(Callable {
+        id: "entry".into(),
+        declaration: "entry-declaration".into(),
+        display: "destruction_app::main".into(),
+        ..Default::default()
+    });
+    let mut foreign_item = project.declarations[1].clone();
+    foreign_item.id = "foreign-declaration".into();
+    foreign_item.name = "Foreign".into();
+    foreign_item.full_name = "destruction_app::sample::Foreign".into();
+    let foreign = UnitFacts {
+        schema_version: FACT_SCHEMA_VERSION,
+        crate_name: project.crate_name.clone(),
+        crate_identity: "dependency-unit".into(),
+        source_files: project.source_files.clone(),
+        declarations: vec![foreign_item],
+        types: vec![TypeInstance {
+            id: "foreign-type".into(),
+            declaration: Some("foreign-declaration".into()),
+            display: "destruction_app::sample::Foreign".into(),
+            roles: vec!["Resource".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    facts["projectUnits"] = json!(["project-unit"]);
+    facts["units"] = json!([foreign, project]);
+    fixture.write("facts.json", &facts);
+    fixture.build().unwrap();
+    let model = fixture.read("model.json");
+    assert_eq!(model["projectCrates"], json!(["destruction_app"]));
+    let objects = model["objects"].as_array().unwrap();
+    let marker = objects
+        .iter()
+        .find(|object| object["typeInstanceId"] == "marker-type")
+        .unwrap();
+    assert_eq!(marker["feature"], "sample");
+    assert_eq!(marker["typeIdentity"]["project"], true);
+    assert!(
+        !objects
+            .iter()
+            .any(|object| object["typeInstanceId"] == "foreign-type")
+    );
+    let app = objects
+        .iter()
+        .find(|object| object["id"] == "app-main")
+        .unwrap();
+    assert_eq!(app["sourceEntries"][0]["path"], "src/main.rs");
+    assert!(
+        model["schedulePluginCatalog"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| group["id"] == "plugin:sample")
+    );
 }
 
 #[test]
@@ -1352,6 +1428,7 @@ fn feature_representatives_are_existing_plugins_and_stable_across_native_order()
     ] {
         unit.declarations.push(Declaration {
             id: format!("{id}-declaration"),
+            local: crate_name == "demo",
             full_name: path.into(),
             name: name.into(),
             crate_name: crate_name.into(),

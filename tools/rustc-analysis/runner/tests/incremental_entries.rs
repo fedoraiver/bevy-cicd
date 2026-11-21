@@ -797,6 +797,19 @@ fn all_public_entries_reuse_hot_units_and_recompile_only_changed_root_sources() 
             ] {
                 assert!(files.contains_key(Path::new(name)));
             }
+            let facts: Value =
+                serde_json::from_slice(&fs::read(output.join("facts.json")).unwrap()).unwrap();
+            let selected = facts["projectUnits"].as_array().unwrap();
+            let units = facts["units"].as_array().unwrap();
+            let expected_name = fixture.package.replace('-', "_");
+            let owned: Vec<_> = units
+                .iter()
+                .filter(|unit| unit["crateName"] == expected_name)
+                .map(|unit| unit["crateIdentity"].clone())
+                .collect();
+            assert!(!owned.is_empty() && owned.len() < units.len(), "{facts}");
+            assert_eq!(selected.len(), owned.len());
+            assert!(owned.iter().all(|id| selected.contains(id)));
             // 导出使用真实秒级时间，跨秒后仍须保留相同快照的原始发布时间。
             std::thread::sleep(Duration::from_secs(1));
             Some(files)

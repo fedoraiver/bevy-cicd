@@ -18,6 +18,8 @@ struct Bundle {
     compiler: String,
     configuration: Value,
     workspace: String,
+    #[serde(default)]
+    project_units: Option<BTreeSet<String>>,
     packages: Vec<Value>,
     #[serde(default)]
     source_origins: Vec<Value>,
@@ -28,6 +30,7 @@ struct Bundle {
 struct Model {
     root: PathBuf,
     source_cache: SourceCache,
+    project_declarations: BTreeSet<String>,
     declarations: BTreeMap<String, Declaration>,
     types: BTreeMap<String, TypeInstance>,
     callables: BTreeMap<String, Callable>,
@@ -512,10 +515,14 @@ impl Model {
         vec![entry]
     }
 
+    fn is_project_declaration(&self, declaration: &Declaration) -> bool {
+        self.project_declarations.contains(&declaration.id)
+    }
+
     fn feature(&mut self, declaration: Option<&Declaration>) -> String {
         let id = declaration
             .map(|declaration| {
-                if declaration.crate_name == "demo" {
+                if self.is_project_declaration(declaration) {
                     declaration
                         .full_name
                         .split("::")
@@ -594,7 +601,7 @@ impl Model {
         let feature = self.feature(declaration.as_ref());
         let type_identity = declaration.as_ref().map(|declaration| {
             let mut identity = json!({"declarationId":declaration.id,"crateName":declaration.crate_name,
-                "defPath":declaration.full_name,"local":declaration.local,"roles":ty.roles});
+                "defPath":declaration.full_name,"local":declaration.local,"project":self.is_project_declaration(declaration),"roles":ty.roles});
             if let Some(dependency) = sources.iter().find_map(|source| source.get("dependency")) {
                 identity["package"] = json!({"name":dependency["name"],"version":dependency["version"]});
             }
@@ -934,10 +941,23 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
             "Compiler source origin commit mismatch"
         );
     }
+    if let Some(project_units) = &bundle.project_units {
+        let available_units: BTreeSet<_> = bundle
+            .units
+            .iter()
+            .map(|unit| unit.crate_identity.clone())
+            .collect();
+        ensure!(
+            !project_units.is_empty() && project_units.is_subset(&available_units),
+            "Project compiler unit provenance is incomplete"
+        );
+    }
     let source_cache = SourceCache::new(root.clone(), bundle.packages, bundle.source_origins);
+    let project_sources = root.join("src");
     let mut model = Model {
         root,
         source_cache,
+        project_declarations: BTreeSet::new(),
         declarations: BTreeMap::new(),
         types: BTreeMap::new(),
         callables: BTreeMap::new(),
@@ -958,6 +978,7 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
     let mut gaps = vec![];
     let mut fact_sources = BTreeMap::new();
     let mut owning = BTreeMap::new();
+    let mut project_crates = BTreeSet::new();
     for unit in bundle.units {
         ensure!(
             unit.schema_version == FACT_SCHEMA_VERSION,
@@ -994,7 +1015,27 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
             );
             fact_sources.insert(source.path, source.sha256);
         }
+        let project_unit = bundle.project_units.as_ref().map_or_else(
+            || {
+                // 早期事实包没有项目单元，使用本项目 src 下的 owning 声明恢复归属。
+                unit.declarations.iter().any(|declaration| {
+                    declaration.local
+                        && declaration.source.as_ref().is_some_and(|source| {
+                            Path::new(&source.path)
+                                .canonicalize()
+                                .is_ok_and(|path| path.starts_with(&project_sources))
+                        })
+                })
+            },
+            |units| units.contains(&unit.crate_identity),
+        );
+        if project_unit {
+            project_crates.insert(unit.crate_name.clone());
+        }
         for declaration in unit.declarations {
+            if project_unit && declaration.local {
+                model.project_declarations.insert(declaration.id.clone());
+            }
             match model.declarations.entry(declaration.id.clone()) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(declaration);
@@ -1086,7 +1127,7 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
                     .declaration
                     .as_ref()
                     .and_then(|id| model.declarations.get(id))
-                    .is_some_and(|declaration| declaration.crate_name == "demo")
+                    .is_some_and(|declaration| model.is_project_declaration(declaration))
         })
         .map(|ty| ty.id.clone())
         .collect();
@@ -1124,7 +1165,12 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
         let Some(declaration) = model.declarations.get(&callable.declaration).cloned() else {
             continue;
         };
-        if declaration.crate_name == "demo" && declaration.name == "main" {
+        if model.is_project_declaration(&declaration)
+            && declaration
+                .full_name
+                .strip_prefix(declaration.crate_name.as_str())
+                == Some("::main")
+        {
             assembly_owners
                 .entry(callable.id.clone())
                 .or_default()
@@ -1267,7 +1313,7 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
                 source_entries.extend(sources);
                 let feature = model.feature(Some(&declaration));
                 features.insert(feature.clone());
-                let group = if declaration.crate_name == "demo" {
+                let group = if model.is_project_declaration(&declaration) {
                     format!("plugin:{feature}")
                 } else {
                     format!("crate:{}", declaration.crate_name)
@@ -2065,7 +2111,7 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
     fs::create_dir_all(output_parent)?;
     analysis_gaps.extend(model.rejected_types.into_values());
     let result = json!({"schemaVersion":2,"compiler":bundle.compiler,"configuration":bundle.configuration,
-        "runtimeDirectory":runtime_directory,"inputs":{"sourceFingerprint":runtime_data.source_fingerprint,"factsSha256":facts_hash,"runtimeSha256":digest(&runtime_bytes)},
+        "runtimeDirectory":runtime_directory,"projectCrates":project_crates,"inputs":{"sourceFingerprint":runtime_data.source_fingerprint,"factsSha256":facts_hash,"runtimeSha256":digest(&runtime_bytes)},
         "objects":model.objects.into_values().collect::<Vec<_>>(),"relations":model.relations.into_values().collect::<Vec<_>>(),"features":model.features.into_values().collect::<Vec<_>>(),
         "sourceFiles":model.source_cache.snapshots.into_values().collect::<Vec<_>>(),"callGraph":call_graph,"scheduleInteractions":{"schemaVersion":1,"views":bindings},"schedulePluginCatalog":group_catalog.into_values().collect::<Vec<_>>(),"schedulePluginGroups":schedule_groups,
         "bindingErrors":model.fatal,"analysisGaps":aggregate_gaps(analysis_gaps)});

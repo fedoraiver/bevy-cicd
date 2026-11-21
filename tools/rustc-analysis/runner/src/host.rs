@@ -234,6 +234,7 @@ struct FactBundle {
     compiler: &'static str,
     configuration: String,
     workspace: String,
+    project_units: BTreeSet<String>,
     packages: serde_json::Value,
     source_origins: Vec<serde_json::Value>,
     units: Vec<analysis_contract::facts::UnitFacts>,
@@ -1613,20 +1614,28 @@ fn publish_extraction(
         staging.join("analysis-summary.json"),
         serde_json::to_vec_pretty(&result.summary)?,
     )?;
-    let units = result
-        .reports
-        .into_iter()
-        .map(|report| {
-            report
-                .facts
-                .context("Selected architecture unit has no facts")
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let workspace = normalized(&host.root)?;
+    let mut project_units = BTreeSet::new();
+    let mut units = Vec::with_capacity(result.reports.len());
+    for report in result.reports {
+        let unit = report
+            .facts
+            .context("Selected architecture unit has no facts")?;
+        if report.manifest_dir == workspace {
+            project_units.insert(unit.crate_identity.clone());
+        }
+        units.push(unit);
+    }
+    ensure!(
+        !project_units.is_empty(),
+        "No compiler facts for the caller package"
+    );
     let bundle = FactBundle {
         schema_version: analysis_contract::facts::FACT_SCHEMA_VERSION,
         compiler: env!("ANALYSIS_COMPILER"),
         configuration: result.configuration,
-        workspace: normalized(&host.root)?,
+        workspace,
+        project_units,
         packages: result.packages,
         source_origins,
         units,
