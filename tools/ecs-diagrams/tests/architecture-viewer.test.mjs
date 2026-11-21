@@ -244,7 +244,7 @@ test('external bootstrap embeds only its index and file URLs explain the local s
   assert.equal(Boolean(document.querySelector('.build-context')),false);
   for(const value of [bootstrap.target,bootstrap.sourceCommit.slice(0,12),bootstrap.buildId])assert.ok(!document.querySelector('header').textContent.includes(value));
   const app=await startExternalArchitecture({bootstrap,document,window:{},location:new URL('file:///D:/demo/docs/diagrams/generated/pages/ecs-architecture.html'),fetch:()=>{requests++;throw new Error('must not fetch')}});
-  assert.equal(app,null);assert.equal(requests,0);assert.ok(document.getElementById('schedule-status').textContent.includes('node docs/diagrams/serve.mjs'));
+  assert.equal(app,null);assert.equal(requests,0);assert.ok(document.getElementById('schedule-status').textContent.includes('本地 HTTP 预览'));
 });
 
 function assertFitted(page) {
