@@ -1,0 +1,175 @@
+name: Bevy architecture Pages
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: Pages artifact uploaded in this run. The proof artifact adds the suffix -proof.
+        required: true
+        type: string
+    outputs:
+      page_url:
+        description: The deployed URL after HTTP verification.
+        value: ${{ jobs.deploy.outputs.page_url }}
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: Publish architecture Pages
+    if: >-
+      ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: bevy-cicd-architecture-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.verify.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.verify.outputs.page_url }}
+    steps:
+      - name: Check out workflow helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+          path: bevy-cicd
+
+      - name: Download this run's publication proof
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ format('{0}-proof', inputs.artifact-name) }}
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          path: publication-proof
+
+      - name: Validate the publication proof
+        run: python3 bevy-cicd/scripts/verify_pages.py validate publication-proof/bevy-cicd-build.json
+
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Confirm current default-branch commit (attempt 1 of 6)
+        id: current_1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 bevy-cicd/scripts/verify_pages.py current
+
+      - name: Deploy checked Pages artifact (attempt 1 of 6)
+        id: deploy_1
+        if: ${{ steps.current_1.outputs.current == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          artifact_name: ${{ inputs.artifact-name }}
+          timeout: '300000'
+
+      - name: Confirm current default-branch commit (attempt 2 of 6)
+        id: current_2
+        if: ${{ steps.deploy_1.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 bevy-cicd/scripts/verify_pages.py current --wait 60
+
+      - name: Deploy checked Pages artifact (attempt 2 of 6)
+        id: deploy_2
+        if: ${{ steps.current_2.outputs.current == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          artifact_name: ${{ inputs.artifact-name }}
+          timeout: '300000'
+
+      - name: Confirm current default-branch commit (attempt 3 of 6)
+        id: current_3
+        if: ${{ steps.deploy_2.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 bevy-cicd/scripts/verify_pages.py current --wait 60
+
+      - name: Deploy checked Pages artifact (attempt 3 of 6)
+        id: deploy_3
+        if: ${{ steps.current_3.outputs.current == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          artifact_name: ${{ inputs.artifact-name }}
+          timeout: '300000'
+
+      - name: Confirm current default-branch commit (attempt 4 of 6)
+        id: current_4
+        if: ${{ steps.deploy_3.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 bevy-cicd/scripts/verify_pages.py current --wait 60
+
+      - name: Deploy checked Pages artifact (attempt 4 of 6)
+        id: deploy_4
+        if: ${{ steps.current_4.outputs.current == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          artifact_name: ${{ inputs.artifact-name }}
+          timeout: '300000'
+
+      - name: Confirm current default-branch commit (attempt 5 of 6)
+        id: current_5
+        if: ${{ steps.deploy_4.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 bevy-cicd/scripts/verify_pages.py current --wait 60
+
+      - name: Deploy checked Pages artifact (attempt 5 of 6)
+        id: deploy_5
+        if: ${{ steps.current_5.outputs.current == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          artifact_name: ${{ inputs.artifact-name }}
+          timeout: '300000'
+
+      - name: Confirm current default-branch commit (attempt 6 of 6)
+        id: current_6
+        if: ${{ steps.deploy_5.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 bevy-cicd/scripts/verify_pages.py current --wait 60
+
+      - name: Deploy checked Pages artifact (attempt 6 of 6)
+        id: deploy_6
+        if: ${{ steps.current_6.outputs.current == 'true' }}
+        timeout-minutes: 5
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          artifact_name: ${{ inputs.artifact-name }}
+          timeout: '300000'
+
+      - name: Verify the published proof and index over HTTP
+        id: verify
+        if: >-
+          ${{ steps.deploy_1.outcome == 'success' || steps.deploy_2.outcome == 'success' ||
+              steps.deploy_3.outcome == 'success' || steps.deploy_4.outcome == 'success' ||
+              steps.deploy_5.outcome == 'success' || steps.deploy_6.outcome == 'success' }}
+        env:
+          PAGE_URL: >-
+            ${{ steps.deploy_1.outcome == 'success' && steps.deploy_1.outputs.page_url ||
+                steps.deploy_2.outcome == 'success' && steps.deploy_2.outputs.page_url ||
+                steps.deploy_3.outcome == 'success' && steps.deploy_3.outputs.page_url ||
+                steps.deploy_4.outcome == 'success' && steps.deploy_4.outputs.page_url ||
+                steps.deploy_5.outcome == 'success' && steps.deploy_5.outputs.page_url ||
+                steps.deploy_6.outcome == 'success' && steps.deploy_6.outputs.page_url }}
+        run: python3 bevy-cicd/scripts/verify_pages.py verify publication-proof/bevy-cicd-build.json "$PAGE_URL"

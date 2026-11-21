@@ -1,0 +1,77 @@
+name: Validate Bevy compiler rules
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/bevy-rules.yml'
+      - '.github/workflows/rust-checks.yml'
+      - '.github/workflows/test-bevy-rules.yml'
+      - 'rust-toolchain.toml'
+      - 'scripts/rustc-analysis.sh'
+      - 'tests/fixtures/bevy-rules/**'
+      - 'tools/**'
+  push:
+    paths:
+      - '.github/workflows/bevy-rules.yml'
+      - '.github/workflows/rust-checks.yml'
+      - '.github/workflows/test-bevy-rules.yml'
+      - 'rust-toolchain.toml'
+      - 'scripts/rustc-analysis.sh'
+      - 'tests/fixtures/bevy-rules/**'
+      - 'tools/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Check Rust with optional features
+    uses: ./.github/workflows/rust-checks.yml
+    with:
+      project-path: tests/fixtures/bevy-rules
+      features: extra
+
+  caller:
+    name: Check a Bevy project
+    uses: ./.github/workflows/bevy-rules.yml
+    with:
+      package-path: tests/fixtures/bevy-rules
+      features: extra
+
+  regressions:
+    name: Compiler and rule regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - name: Check out compiler sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run compiler and rule regressions
+        shell: bash
+        run: bash scripts/rustc-analysis.sh test
+
+      - name: Detect violations in a Bevy project
+        shell: bash
+        run: |
+          package="$GITHUB_WORKSPACE/tests/fixtures/bevy-rules"
+          bash scripts/rustc-analysis.sh prepare "$package"
+          for rule in entity-names named-fields; do
+            status=0
+            output=$(bash scripts/rustc-analysis.sh check --rule "$rule" --workspace "$package" --features violations 2>&1) || status=$?
+            printf '%s\n' "$output"
+            if [[ "$status" != 1 ]]; then
+              echo "::error::Expected a $rule violation (exit 1), received exit $status."
+              exit 1
+            fi
+            case "$rule" in
+              entity-names) grep -F 'error[entity-name]' <<< "$output" ;;
+              named-fields) grep -F 'error[named-fields]' <<< "$output" ;;
+            esac
+          done

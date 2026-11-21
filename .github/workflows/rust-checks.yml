@@ -1,0 +1,140 @@
+name: Rust checks
+
+on:
+  workflow_call:
+    inputs:
+      project-path:
+        description: Directory containing the caller's Cargo manifest
+        default: '.'
+        type: string
+      features:
+        description: Comma-separated features for an additional configuration
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.project-path }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - name: Check out caller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare Rust toolchain
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+          import tomllib
+
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          project = pathlib.Path.cwd().resolve()
+          toolchain = {"channel": "stable", "profile": "minimal"}
+          for directory in (project, *project.parents):
+              if directory != root and root not in directory.parents:
+                  break
+              legacy = directory / "rust-toolchain"
+              current = directory / "rust-toolchain.toml"
+              if legacy.is_file():
+                  text = legacy.read_text(encoding="utf-8").strip()
+                  if len(text.splitlines()) == 1 and not text.startswith("["):
+                      toolchain = {"channel": text}
+                  else:
+                      toolchain = tomllib.loads(text)["toolchain"]
+                  break
+              if current.is_file():
+                  toolchain = tomllib.loads(current.read_text(encoding="utf-8"))["toolchain"]
+                  break
+
+          channel = toolchain["channel"]
+          if not isinstance(channel, str) or not channel or channel.startswith("-") or any(c.isspace() for c in channel):
+              raise SystemExit("Expected a rustup channel in the project toolchain")
+          components = sorted(set(toolchain.get("components", ())) | {"clippy", "rustfmt"})
+          targets = toolchain.get("targets", ())
+          command = ["rustup", "toolchain", "install", channel,
+                     "--profile", toolchain.get("profile", "minimal"), "--component", ",".join(components)]
+          if targets:
+              command.extend(("--target", ",".join(targets)))
+          subprocess.run(command, check=True)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              print(f"RUSTUP_TOOLCHAIN={channel}", file=environment)
+          PY
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Install Bevy Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            g++ pkg-config libx11-dev libasound2-dev libudev-dev \
+            libxkbcommon-x11-0 libwayland-dev libxkbcommon-dev
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock', '**/rust-toolchain', '**/rust-toolchain.toml') }}
+
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+
+      - name: Compile, lint and test
+        env:
+          EXTRA_FEATURES: ${{ inputs.features }}
+        run: |
+          result=0
+          run_checks() {
+            local label="$1"
+            shift
+            local compilation=success clippy=skipped tests=skipped
+            echo "::group::Rust ($label)"
+            if cargo check --locked --workspace --all-targets "$@"; then
+              if cargo clippy --locked --workspace --all-targets "$@" -- --no-deps -W clippy::pedantic; then
+                clippy=success
+              else
+                clippy=failure
+                result=1
+              fi
+              if cargo test --locked --workspace "$@" -- --test-threads=1; then
+                tests=success
+              else
+                tests=failure
+                result=1
+              fi
+            else
+              compilation=failure
+              result=1
+            fi
+            echo "::endgroup::"
+            printf '## Rust (%s)\n\n- Compilation: %s\n- Clippy: %s\n- Headless tests: %s\n\n' \
+              "$label" "$compilation" "$clippy" "$tests" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          run_checks default
+          if [[ -n "$EXTRA_FEATURES" ]]; then
+            run_checks features --features "$EXTRA_FEATURES"
+          fi
+          exit "$result"
+
+      - name: Report available disk
+        if: ${{ always() }}
+        run: df -h .

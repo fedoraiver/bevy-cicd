@@ -1,0 +1,119 @@
+name: Bevy compiler rules
+
+on:
+  workflow_call:
+    inputs:
+      package-path:
+        description: Directory containing the Cargo package to analyze, relative to the caller repository
+        type: string
+        default: '.'
+      features:
+        description: Comma-separated Cargo features for an additional check with default features enabled
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  rules:
+    name: ${{ matrix.rule }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        rule: [entity-names, named-fields]
+    env:
+      ANALYSIS_RULE: ${{ matrix.rule }}
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+
+    steps:
+      - name: Check out caller source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: caller
+          persist-credentials: false
+
+      - name: Check out the compiler rules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: shared
+          persist-credentials: false
+
+      - name: Resolve caller package
+        id: package
+        env:
+          PACKAGE_PATH: ${{ inputs.package-path }}
+        run: |
+          caller=$(realpath -e -- "$GITHUB_WORKSPACE/caller")
+          package=$(realpath -e -- "$caller/$PACKAGE_PATH")
+          if [[ "$package" != "$caller" && "$package" != "$caller/"* ]]; then
+            echo '::error::The Cargo package must be inside the caller repository.'
+            exit 1
+          fi
+          if [[ ! -f "$package/Cargo.toml" ]]; then
+            echo '::error::The selected package directory must contain Cargo.toml.'
+            exit 1
+          fi
+          printf 'path=%s\n' "$package" >> "$GITHUB_OUTPUT"
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            g++ pkg-config libx11-dev libasound2-dev libudev-dev \
+            libxkbcommon-x11-0 libwayland-dev libxkbcommon-dev
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: bevy-rules-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('shared/rust-toolchain.toml', 'shared/tools/rustc-analysis/Cargo.lock', 'caller/**/Cargo.lock') }}
+
+      - name: Build the compiler rules and fetch caller dependencies
+        id: prepare
+        working-directory: shared
+        env:
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: bash scripts/rustc-analysis.sh prepare "$PACKAGE_PATH"
+
+      - name: Check default Cargo features
+        id: default
+        working-directory: shared
+        env:
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: bash scripts/rustc-analysis.sh check --rule "$ANALYSIS_RULE" --workspace "$PACKAGE_PATH"
+
+      - name: Check additional Cargo features
+        id: features
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' && inputs.features != '' }}
+        working-directory: shared
+        env:
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
+          FEATURES: ${{ inputs.features }}
+        run: bash scripts/rustc-analysis.sh check --rule "$ANALYSIS_RULE" --workspace "$PACKAGE_PATH" --features "$FEATURES"
+
+      - name: Summarize checks
+        if: ${{ always() }}
+        env:
+          DEFAULT_OUTCOME: ${{ steps.default.outcome }}
+          FEATURES_OUTCOME: ${{ steps.features.outcome }}
+        run: |
+          {
+            printf '## %s\n\n' "$ANALYSIS_RULE"
+            printf 'Default features: %s\n' "$DEFAULT_OUTCOME"
+            printf 'Additional features: %s\n\n' "$FEATURES_OUTCOME"
+            df -h .
+          } >> "$GITHUB_STEP_SUMMARY"

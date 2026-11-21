@@ -1,0 +1,12 @@
+[package]
+name = "bevy-rules-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bevy_ecs = { version = "=0.20.1", default-features = false }
+
+[features]
+extra = []
+violations = []
