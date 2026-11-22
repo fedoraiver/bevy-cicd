@@ -16,6 +16,7 @@ const LAUNCHER_SOURCE: &[u8] = include_bytes!("launcher_main.rs");
 pub(crate) struct Launcher {
     pub root: PathBuf,
     pub manifest: PathBuf,
+    pub caller_root: PathBuf,
     pub metadata: Value,
     source_lock: PathBuf,
     pub source_lock_digest: String,
@@ -23,16 +24,41 @@ pub(crate) struct Launcher {
 
 pub(crate) fn caller_package<'a>(metadata: &'a Value, root: &Path) -> Result<&'a Value> {
     let manifest = normalized(&root.join("Cargo.toml"))?;
-    packages(metadata)?
+    let packages = packages(metadata)?;
+    let local_package = packages.iter().find(|package| {
+        package["manifest_path"]
+            .as_str()
+            .and_then(|path| normalized(Path::new(path)).ok())
+            .as_ref()
+            == Some(&manifest)
+    });
+    if let Some(package) = local_package {
+        return Ok(package);
+    }
+
+    let workspace = Path::new(string(metadata, "workspace_root")?);
+    ensure!(
+        normalized(&workspace.join("Cargo.toml"))? == manifest,
+        "The selected directory must contain a Cargo package or be the workspace root"
+    );
+    let name = metadata["metadata"]["bevy-architecture"]["package"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .context("A virtual workspace requires [workspace.metadata.bevy-architecture] package = \"<member package name>\"")?;
+    let members = metadata["workspace_members"]
+        .as_array()
+        .context("Missing Cargo workspace members")?;
+    packages
         .iter()
-        .find(|package| {
-            package["manifest_path"]
-                .as_str()
-                .and_then(|path| normalized(Path::new(path)).ok())
-                .as_ref()
-                == Some(&manifest)
-        })
-        .context("The selected root must contain a Cargo package")
+        .find(|package| package["name"] == name && members.contains(&package["id"]))
+        .with_context(|| format!("Architecture package {name:?} is not a workspace member"))
+}
+
+pub(crate) fn package_root(package: &Value) -> Result<PathBuf> {
+    Ok(Path::new(string(package, "manifest_path")?)
+        .parent()
+        .context("The selected package manifest has no directory")?
+        .canonicalize()?)
 }
 
 pub(crate) fn uses_launcher(package: &Value) -> Result<bool> {
@@ -106,6 +132,7 @@ debugdump = ["bevy/debug"]
             .into(),
         );
         let exporter = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bevy-schedule-export");
+        dependencies.insert("serde_json".into(), "1".into());
         dependencies.insert(
             "bevy-schedule-export".into(),
             Table::from_iter([("path".into(), normalized(&exporter)?.into())]).into(),
@@ -179,6 +206,7 @@ debugdump = ["bevy/debug"]
         let launcher = Self {
             root,
             manifest,
+            caller_root: options.root.clone(),
             metadata,
             source_lock,
             source_lock_digest,

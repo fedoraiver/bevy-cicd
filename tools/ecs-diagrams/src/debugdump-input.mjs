@@ -9,8 +9,36 @@ export const sha256 = value => crypto.createHash('sha256').update(value).digest(
 export const scheduleId = (app, label) => sha256(`${app}\0${label}`).slice(0, 16);
 const requireCondition = (condition, message) => { if (!condition) throw new Error(message); };
 
-/** 与 Rust 导出器共用换行归一化和按仓库相对路径排序的指纹协议。 */
-export function sourceFingerprint(root) {
+export function workspaceSourceInputs(inputs) {
+  if (inputs == null) return [];
+  requireCondition(Array.isArray(inputs) && inputs.includes('Cargo.toml') && inputs.includes('Cargo.lock')
+    && new Set(inputs).size === inputs.length, 'Invalid workspace source input list');
+  for (const file of inputs) {
+    requireCondition(typeof file === 'string' && !/[\u0000-\u001f\u007f-\u009f\\:]/.test(file)
+      && file.split('/').every(component => component && component !== '.' && component !== '..'),
+      'Unsafe workspace source input path');
+  }
+  return inputs;
+}
+
+/** 与 Rust 导出器共用源码路径、长度及内容哈希协议。 */
+export function sourceFingerprint(root, sourceInputs) {
+  if (sourceInputs != null) {
+    const rootPath = fs.realpathSync(root);
+    const files = workspaceSourceInputs(sourceInputs).slice().sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+    const hash = crypto.createHash('sha256');
+    for (const file of files) {
+      const filename = path.join(rootPath, file);
+      const expanded = fs.realpathSync(filename);
+      const relative = path.relative(rootPath, expanded);
+      requireCondition(relative && relative !== '..' && !relative.startsWith('..' + path.sep)
+        && !path.isAbsolute(relative) && fs.lstatSync(filename).isFile(),
+        'Workspace source input escapes the project or is not a file');
+      const content = fs.readFileSync(expanded);
+      hash.update(file + '\0' + content.length + '\0').update(content);
+    }
+    return hash.digest('hex');
+  }
   const filenames = ['Cargo.toml', 'Cargo.lock'];
   if (fs.existsSync(path.join(root, 'build.rs'))) filenames.push('build.rs');
   function walk(directory) {
@@ -47,7 +75,7 @@ export function readDebugdump(directory, root, filename = 'manifest.json') {
     const version = lockedVersion(lockRoot, crate);
     requireCondition(version && manifest[field] === version, `Debugdump dependency version mismatch: ${crate}`);
   }
-  requireCondition(manifest.sourceFingerprint === sourceFingerprint(root), 'Debugdump source fingerprint is stale; run the export command again');
+  requireCondition(manifest.sourceFingerprint === sourceFingerprint(root, manifest.sourceInputs), 'Debugdump source fingerprint is stale; run the export command again');
   requireCondition(Number.isSafeInteger(manifest.exportedAt) && manifest.exportedAt >= 0 && typeof manifest.target === 'string' && manifest.target.length > 0, 'Invalid debugdump provenance');
   requireCondition(Array.isArray(manifest.features) && manifest.features.includes('debugdump'), 'Debugdump feature provenance is missing');
   requireCondition(Array.isArray(manifest.schedules) && manifest.schedules.length > 0, 'Debugdump contains no schedules');

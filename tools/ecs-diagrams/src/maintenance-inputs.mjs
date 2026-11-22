@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { hashFile } from './stream-files.mjs';
+import { workspaceSourceInputs } from './debugdump-input.mjs';
 import { pathsForRepository, repositoryRoot, toolRepositoryRoot } from './paths.mjs';
 
 export const digest = value => crypto.createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
@@ -39,6 +40,17 @@ export function relevantInputNames(workspace) {
     ].map(name => path.relative(workspace, path.join(tools, name)))];
   for (const name of ['build.rs', '.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml']) if (fs.existsSync(path.join(workspace, name))) names.push(name);
   if (fs.existsSync(root)) for (const name of fs.readdirSync(root)) if (name.endsWith('.mjs')) names.push(path.relative(workspace, path.join(root, name)));
+  // 仓库内新建的成员源码也会使恢复检查点失效。
+  try {
+    const files = execFileSync('git', ['-C', workspace, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).split('\0');
+    names.push(...files.filter(file => file.endsWith('.rs') || path.basename(file) === 'Cargo.toml'));
+  } catch { /* 普通目录仍按已有 Cargo 输入及导出证据核对。 */ }
+  const manifest = path.join(workspace, 'tmp/ecs-architecture/compiler/debugdump/manifest.json');
+  if (fs.existsSync(manifest)) {
+    try { names.push(...workspaceSourceInputs(JSON.parse(fs.readFileSync(manifest, 'utf8')).sourceInputs)); }
+    catch { /* 提取阶段重新生成无法验证的导出证据。 */ }
+  }
   return names.map(slash);
 }
 

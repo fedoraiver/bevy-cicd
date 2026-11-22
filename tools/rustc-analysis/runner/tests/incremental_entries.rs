@@ -1976,6 +1976,60 @@ fn shared_launcher_exports_the_callers_locked_app_and_keeps_entity_templates() {
         &output.join("model.json"),
     )
     .unwrap();
+    let model: Value =
+        serde_json::from_slice(&fs::read(output.join("model.json")).unwrap()).unwrap();
+    let objects = model["objects"].as_array().unwrap();
+    let plugin = |name| {
+        objects
+            .iter()
+            .find(|object| {
+                object["typeIdentity"]["defPath"] == format!("schedule_app_fixture::{name}")
+            })
+            .and_then(|object| object["id"].as_str())
+            .unwrap()
+    };
+    let app = objects
+        .iter()
+        .find(|object| object["id"] == "app-main")
+        .unwrap();
+    assert_eq!(app["sourceEntries"][0]["path"], "src/lib.rs");
+    let relations = model["relations"].as_array().unwrap();
+    let group = plugin("FixturePlugins");
+    let disabled = plugin("DisabledPlugin");
+    let reenabled = plugin("ReenabledPlugin");
+    let separate = plugin("SeparatelyInstalledPlugin");
+    let assembly = relations
+        .iter()
+        .find(|relation| relation["from"] == "app-main" && relation["to"] == group)
+        .expect("the actual plugin group must be linked from the app factory");
+    assert_eq!(assembly["scope"], "static-callsite");
+    let configuration = assembly["pluginGroupConfigurations"].as_array().unwrap();
+    assert_eq!(configuration.len(), 1);
+    let configured_disabled = configuration[0]["disabledMembers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|member| member["pluginId"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(configured_disabled, BTreeSet::from([disabled, separate]));
+    for member in [disabled, reenabled, separate] {
+        assert!(relations.iter().any(|relation| {
+            relation["from"] == group
+                && relation["to"] == member
+                && relation["kind"] == "plugin_group_member"
+                && relation["scope"] == "plugin-group-declaration"
+        }));
+    }
+    assert!(!relations.iter().any(|relation| {
+        (relation["from"] == "app-main" || relation["from"] == group)
+            && relation["to"] == disabled
+            && relation["scope"] == "static-callsite"
+    }));
+    assert!(relations.iter().any(|relation| {
+        relation["from"] == "app-main"
+            && relation["to"] == separate
+            && relation["scope"] == "static-callsite"
+    }));
 
     let before = package_summaries(package);
     extract(&options, &output).unwrap();
@@ -1985,4 +2039,97 @@ fn shared_launcher_exports_the_callers_locked_app_and_keeps_entity_templates() {
     assert_eq!(fs::read(dump).unwrap(), first_dump);
     assert_eq!(fs::read(fixture.join("Cargo.toml")).unwrap(), manifest);
     assert_eq!(fs::read(fixture.join("Cargo.lock")).unwrap(), lock);
+}
+
+// 工作区清单选择应用包，编译和导出仍绑定共享源码及根锁文件。
+#[test]
+fn shared_launcher_exports_an_explicit_virtual_workspace_member() {
+    let _serial = host_test_guard();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schedule-app");
+    let root = repository().join("tmp/ra/tests").join(format!(
+        "virtual-app-{}-{}",
+        std::process::id(),
+        NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let member = root.join("app");
+    fs::create_dir_all(member.join("src")).unwrap();
+    let manifest = fs::read_to_string(source.join("Cargo.toml"))
+        .unwrap()
+        .replace("\r\n", "\n")
+        .replace("[workspace]\nresolver = \"3\"\n\n", "");
+    fs::write(member.join("Cargo.toml"), manifest).unwrap();
+    let library = r#"
+#[path = "../../shared.rs"]
+mod shared;
+use bevy::prelude::*;
+
+pub fn build_app() -> App {
+    assert_eq!(std::path::Path::new(&std::env::var("BEVY_ASSET_ROOT").unwrap()).canonicalize().unwrap(), std::env::current_dir().unwrap().canonicalize().unwrap());
+    let mut app = App::new();
+    app.add_systems(Update, shared::registered_system);
+    app
+}
+"#;
+    fs::write(member.join("src/lib.rs"), library).unwrap();
+    fs::write(
+        root.join("shared.rs"),
+        r#"
+use bevy::prelude::*;
+pub fn registered_system(mut commands: Commands) {
+    commands.spawn(Name::new("shared entity"));
+}
+"#,
+    )
+    .unwrap();
+    let workspace = "[workspace]\nresolver = \"3\"\nmembers = [\"app\"]\n";
+    fs::write(root.join("Cargo.toml"), workspace).unwrap();
+    let lock = fs::read(source.join("Cargo.lock")).unwrap();
+    fs::write(root.join("Cargo.lock"), &lock).unwrap();
+    let output = root.join("out");
+    let mut options = Options::new(root.clone());
+    options.driver = Some(driver());
+
+    let error = extract(&options, &output).unwrap_err().to_string();
+    assert!(
+        error.contains("workspace.metadata.bevy-architecture"),
+        "{error}"
+    );
+    let root_manifest = format!(
+        "{workspace}\n[workspace.metadata.bevy-architecture]\npackage = \"schedule-app-fixture\"\n"
+    );
+    fs::write(root.join("Cargo.toml"), &root_manifest).unwrap();
+    extract(&options, &output).unwrap();
+    let dump: Value =
+        serde_json::from_slice(&fs::read(output.join("debugdump/manifest.json")).unwrap()).unwrap();
+    let expected_paths = [
+        "Cargo.toml",
+        "Cargo.lock",
+        "app/Cargo.toml",
+        "app/src/lib.rs",
+        "shared.rs",
+    ];
+    let inputs = dump["sourceInputs"].as_array().unwrap();
+    for path in expected_paths {
+        assert!(
+            inputs.iter().any(|entry| entry == path),
+            "Missing {path}: {inputs:?}"
+        );
+    }
+    let facts = output.join("facts.json");
+    let runtime = output.join("runtime.json");
+    let model = output.join("model.json");
+    rustc_analysis::model::build(&facts, &runtime, &model).unwrap();
+    let architecture: Value = serde_json::from_reader(fs::File::open(&model).unwrap()).unwrap();
+    assert!(
+        architecture["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|object| { object["kind"] == "Entity" && object["name"] == "shared entity" })
+    );
+    assert_eq!(fs::read(root.join("Cargo.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read_to_string(root.join("Cargo.toml")).unwrap(),
+        root_manifest
+    );
 }

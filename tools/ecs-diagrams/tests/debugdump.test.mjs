@@ -225,3 +225,20 @@ test('classified Schedule validation reads DOT and manifest separately from SVG 
   const first = result.views[0];fs.writeFileSync(path.join(paths.dotDirectory, first.filename), first.svg);fs.unlinkSync(artifactFile(paths, first));
   assert.throws(() => checkDebugdumpViews(paths.dotDirectory, repository, result.views), /ENOENT/);
 });
+
+test('workspace source proof covers nested Cargo packages, shared code and exact bytes', () => {
+  const { repository, manifest, save } = fixture();
+  fs.mkdirSync(path.join(repository, 'app/src'), { recursive: true });
+  fs.writeFileSync(path.join(repository, 'app/Cargo.toml'), '[package]\nname = "app"\n');
+  fs.writeFileSync(path.join(repository, 'app/src/lib.rs'), 'pub fn build_app() {}\r\n');
+  fs.writeFileSync(path.join(repository, 'build-config.bin'), Buffer.from([0, 13, 10, 255]));
+  const inputs = ['Cargo.toml', 'Cargo.lock', 'app/Cargo.toml', 'app/src/lib.rs', 'src/main.rs', 'build-config.bin'];
+  manifest.sourceInputs = inputs;
+  manifest.sourceFingerprint = sourceFingerprint(repository, inputs);
+  save();
+  assert.equal(sourceFingerprint(repository, [...inputs].reverse()), manifest.sourceFingerprint);
+  assert.doesNotThrow(() => readDebugdump(repository, repository));
+  assert.throws(() => sourceFingerprint(repository, ['Cargo.toml', 'Cargo.lock', '../outside']), /Unsafe workspace source input/);
+  fs.writeFileSync(path.join(repository, 'app/src/lib.rs'), 'pub fn build_app() {}\n');
+  assert.throws(() => readDebugdump(repository, repository), /source fingerprint is stale/);
+});

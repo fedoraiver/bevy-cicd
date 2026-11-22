@@ -146,13 +146,17 @@ impl Callbacks for Checker {
         let mut report = self.pending.take().unwrap_or_else(|| self.report(tcx));
         if self.analyze && self.request.rule != Rule::NamedFields {
             let result = match self.request.rule {
-                Rule::EntityNames => {
-                    crate::entity::analysis::check(tcx).map(|entities| report.entities = entities)
-                }
+                Rule::EntityNames => crate::entity::analysis::check(tcx, &self.request.workspace)
+                    .map(|entities| report.entities = entities),
                 Rule::Architecture => {
                     let project = self.request.manifest_dirs.contains(&report.manifest_dir);
-                    crate::ecs::extract_for_project(tcx, &self.request.package_origins, project)
-                        .map(|facts| report.facts = Some(facts))
+                    crate::ecs::extract_for_project(
+                        tcx,
+                        &self.request.package_origins,
+                        project,
+                        Some(&self.request.workspace),
+                    )
+                    .map(|facts| report.facts = Some(facts))
                 }
                 Rule::NamedFields => unreachable!(),
             };

@@ -152,7 +152,8 @@ jobs:
             project/tmp/ecs-architecture/resource-time.txt
             project/tmp/ecs-architecture/routing/*-failed.json
             project/tmp/ecs-architecture/routing/*-failed.svg
-            project/tmp/ra/r/
+            bevy-cicd/tmp/ra/r/
+            project/logs/
 
       - name: Upload the validated Pages artifact
         uses: actions/upload-pages-artifact@main
@@ -165,6 +166,8 @@ jobs:
         uses: actions/upload-artifact@main
         with:
           name: ${{ env.PAGES_ARTIFACT_NAME }}-proof
-          path: ${{ env.PAGES_DIR }}/bevy-cicd-build.json
+          path: |
+            ${{ env.PAGES_DIR }}/bevy-cicd-build.json
+            ${{ env.PAGES_DIR }}/site-manifest.json
           if-no-files-found: error
           retention-days: 3

@@ -52,6 +52,8 @@ const TRAITS: &[(&str, &str)] = &[
 ];
 
 pub const SOURCE_PREVIEW_CHAR_LIMIT: usize = 512;
+const PLUGIN_GROUP_BUILDER: &str = "bevy_app::plugin_group::PluginGroupBuilder";
+const PLUGIN_GROUP: &str = "bevy_app::plugin_group::PluginGroup";
 
 fn digest(bytes: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(bytes.as_ref()))
@@ -87,6 +89,7 @@ pub fn extract_with_origins(
         tcx,
         origins,
         std::env::var_os("CARGO_PRIMARY_PACKAGE").is_some(),
+        None,
     )
 }
 
@@ -94,6 +97,7 @@ pub(crate) fn extract_for_project(
     tcx: TyCtxt<'_>,
     origins: &[analysis_contract::PackageOrigin],
     project: bool,
+    workspace: Option<&str>,
 ) -> Result<UnitFacts> {
     let traits = tcx
         .all_traits_including_private()
@@ -202,7 +206,7 @@ pub(crate) fn extract_for_project(
     collector.seed_native_system_instances();
     collector.collect_mir_instances();
     if project {
-        collector.collect_entity_templates()?;
+        collector.collect_entity_templates(workspace)?;
     }
     // include!、过程宏实际加载的文件也参与内容指纹，不能只枚举 src/。
     for file in tcx.sess.source_map().files().iter() {
@@ -1817,6 +1821,7 @@ impl<'tcx> Collector<'tcx> {
                         target: Some(target),
                         type_id: Some(type_id),
                         source,
+                        ..Default::default()
                     });
                 }
             }
@@ -1853,6 +1858,7 @@ impl<'tcx> Collector<'tcx> {
                 | "bevy_ecs::schedule::schedule::Schedules"
                 | "bevy_app::app::App"
                 | "bevy_app::sub_app::SubApp"
+                | PLUGIN_GROUP_BUILDER
         ) {
             return None;
         }
@@ -1921,9 +1927,9 @@ impl<'tcx> Collector<'tcx> {
         vec![Some(self.type_id(target, env, 0))]
     }
 
-    fn collect_entity_templates(&mut self) -> Result<()> {
+    fn collect_entity_templates(&mut self, workspace: Option<&str>) -> Result<()> {
         // 名称检查器的值流引擎同时输出结构，确保 BSN、Bundle 与 required 使用同一解释。
-        let structures = crate::entity::analysis::structures(self.tcx)?;
+        let structures = crate::entity::analysis::structures(self.tcx, workspace)?;
         let mut sites: HashMap<String, HashMap<Span, usize>> = HashMap::new();
         let mut groups: Vec<(
             String,
@@ -2393,6 +2399,19 @@ impl<'tcx> BodyVisitor<'_, 'tcx> {
                 });
             }
         }
+        if let Some(kind) = match (receiver_path.as_str(), name.as_str()) {
+            (PLUGIN_GROUP_BUILDER, "add" | "add_before" | "add_after") => Some("group_member"),
+            (PLUGIN_GROUP_BUILDER, "add_group") => Some("group_include"),
+            ("bevy_app::app::App" | "bevy_app::sub_app::SubApp", "add_plugins") => {
+                Some("add_plugins")
+            }
+            _ => None,
+        } {
+            if let Some(target) = arguments.get(offset) {
+                self.plugin_registration(kind, target, &source);
+            }
+            return;
+        }
         match name.as_str() {
             "queue" if commands => {
                 for argument in arguments {
@@ -2411,8 +2430,8 @@ impl<'tcx> BodyVisitor<'_, 'tcx> {
                     }
                 }
             }
-            "add_systems" | "add_observer" | "observe" | "configure_sets" | "add_plugins"
-            | "register_type" | "add_message" => {
+            "add_systems" | "add_observer" | "observe" | "configure_sets" | "register_type"
+            | "add_message" => {
                 let index = offset + usize::from(name == "add_systems");
                 if let Some(target) = arguments.get(index) {
                     let functions = self.registration_functions(target);
@@ -2426,6 +2445,7 @@ impl<'tcx> BodyVisitor<'_, 'tcx> {
                             target: None,
                             type_id: Some(type_id),
                             source,
+                            ..Default::default()
                         });
                     } else {
                         for (target_id, target_args) in functions {
@@ -2436,6 +2456,7 @@ impl<'tcx> BodyVisitor<'_, 'tcx> {
                                 target: Some(target),
                                 type_id: Some(type_id.clone()),
                                 source: source.clone(),
+                                ..Default::default()
                             });
                         }
                     }
@@ -2443,6 +2464,102 @@ impl<'tcx> BodyVisitor<'_, 'tcx> {
             }
             _ => {}
         }
+    }
+
+    fn plugin_registration(
+        &mut self,
+        kind: &str,
+        target: &'tcx Expr<'tcx>,
+        source: &Option<SourceEvidence>,
+    ) {
+        if let ExprKind::Tup(items) = target.kind {
+            for item in items {
+                self.plugin_registration(kind, item, source);
+            }
+            return;
+        }
+        let (ty, disabled_group_members) = self
+            .plugin_group_configuration(target)
+            .unwrap_or_else(|| (self.types.expr_ty(target), Vec::new()));
+        let type_id = self.collector.type_id(ty, self.env, 0);
+        let function = self
+            .resolved(target)
+            .map(|(id, args)| self.collector.callable(id, args, self.env));
+        self.collector.facts.registrations.push(RegistrationFact {
+            owner: self.owner.clone(),
+            kind: kind.into(),
+            target: function,
+            type_id: Some(type_id),
+            source: source.clone(),
+            disabled_group_members,
+        });
+    }
+
+    fn plugin_group_configuration(
+        &mut self,
+        expr: &'tcx Expr<'tcx>,
+    ) -> Option<(Ty<'tcx>, Vec<DisabledGroupMember>)> {
+        let (method, args, receiver, values, method_span) = match expr.kind {
+            ExprKind::MethodCall(segment, receiver, values, _) => (
+                self.types.type_dependent_def_id(expr.hir_id)?,
+                self.types.node_args(expr.hir_id),
+                receiver,
+                values,
+                segment.ident.span,
+            ),
+            ExprKind::Call(function, [receiver, values @ ..]) => {
+                let (method, args) = self.resolved(function)?;
+                (method, args, receiver, values, function.span)
+            }
+            _ => return None,
+        };
+        let tcx = self.collector.tcx;
+        let name = tcx.opt_item_name(method)?;
+        let receiver_ty = self.types.expr_ty_adjusted(receiver);
+        if tcx
+            .trait_of_assoc(method)
+            .is_some_and(|id| full_path(tcx, id) == PLUGIN_GROUP)
+            && matches!(name.as_str(), "build" | "set")
+            && !matches!(receiver_ty.kind(), ty::Adt(adt, _) if full_path(tcx, adt.did()) == PLUGIN_GROUP_BUILDER)
+        {
+            return Some((receiver_ty, Vec::new()));
+        }
+        if self
+            .collector
+            .framework_api_owner(method, args, self.env, Some(receiver_ty))
+            .as_deref()
+            != Some(PLUGIN_GROUP_BUILDER)
+        {
+            return None;
+        }
+        let (group, mut disabled) = self.plugin_group_configuration(receiver)?;
+        let name = name.as_str();
+        match name {
+            "disable" | "enable" | "add" | "add_before" | "add_after" => {
+                let member = if matches!(name, "disable" | "enable") {
+                    args.types().last()?
+                } else {
+                    self.types.expr_ty(values.first()?)
+                };
+                let type_id = self.collector.type_id(member, self.env, 0);
+                disabled.retain(|member| member.type_id != type_id);
+                if name == "disable" {
+                    disabled.push(DisabledGroupMember {
+                        type_id,
+                        source: self.collector.source(method_span, "registration"),
+                    });
+                }
+            }
+            "set" => {}
+            "add_group" => {
+                // 合并组可覆盖已有成员状态，只保留合入构建器能够证明的禁用项。
+                disabled = self
+                    .plugin_group_configuration(values.first()?)
+                    .map_or_else(Vec::new, |(_, members)| members);
+            }
+            _ => return None,
+        }
+        Some((group, disabled))
     }
 
     fn registration_functions(&self, expr: &'tcx Expr<'tcx>) -> Vec<(DefId, GenericArgsRef<'tcx>)> {
