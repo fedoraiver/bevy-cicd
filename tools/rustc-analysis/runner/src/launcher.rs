@@ -63,7 +63,7 @@ impl Launcher {
         workspace: &Path,
         cache: &Path,
         baseline: &Value,
-        mut cargo: Command,
+        cargo: impl Fn() -> Command,
     ) -> Result<Self> {
         let caller = caller_package(baseline, &options.root)?;
         let caller_id = string(caller, "id")?;
@@ -141,19 +141,26 @@ debugdump = ["bevy/debug"]
         {
             write_if_changed(&launcher_lock, &source_lock_bytes)?;
         }
-        let output = cargo
-            .args([
-                "metadata",
-                "--offline",
-                "--format-version",
-                "1",
-                "--manifest-path",
-            ])
-            .arg(&manifest)
-            .output()?;
+        let resolve = |offline: bool| {
+            let mut command = cargo();
+            command
+                .args(["metadata", "--format-version", "1", "--manifest-path"])
+                .arg(&manifest);
+            if offline {
+                command.arg("--offline");
+            }
+            command.output()
+        };
+        let mut output = resolve(true)?;
+        if !output.status.success() && offline_dependencies_missing(&output.stderr) {
+            // Enabling Bevy's debug feature can introduce new index entries even for weak
+            // optional dependencies. Only resolution of the overlay can use the network.
+            eprintln!("Resolving launcher dependencies missing from Cargo's offline cache");
+            output = resolve(false)?;
+        }
         ensure!(
             output.status.success(),
-            "Cannot resolve the dedicated launcher offline. Prepare architecture dependencies first.\n{}",
+            "Cannot resolve dependencies for the dedicated launcher.\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
         let metadata: Value = serde_json::from_slice(&output.stdout)?;
@@ -188,6 +195,15 @@ debugdump = ["bevy/debug"]
         );
         Ok(())
     }
+}
+
+fn offline_dependencies_missing(stderr: &[u8]) -> bool {
+    let diagnostic = String::from_utf8_lossy(stderr);
+    diagnostic.contains("--offline was specified")
+        || diagnostic.contains("offline mode")
+            && (diagnostic.contains("no matching package named")
+                || diagnostic.contains("failed to select a version")
+                || diagnostic.contains("can't checkout"))
 }
 
 fn selected_features(options: &Options, caller: &Value) -> Result<Vec<String>> {
@@ -336,4 +352,25 @@ fn write_if_changed(filename: &Path, bytes: &[u8]) -> Result<()> {
     }
     fs::write(filename, bytes)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::offline_dependencies_missing;
+
+    #[test]
+    fn launcher_only_retries_offline_dependency_diagnostics() {
+        assert!(offline_dependencies_missing(
+            b"error: no matching package named `bevy_render` found\nnote: offline mode (via `--offline`) can sometimes cause surprising resolution failures"
+        ));
+        assert!(offline_dependencies_missing(
+            b"error: failed to download `bevy_render v0.20.1`\n\nCaused by:\n  attempting to make an HTTP request, but --offline was specified"
+        ));
+        assert!(!offline_dependencies_missing(
+            b"error: failed to parse manifest at `Cargo.toml`"
+        ));
+        assert!(!offline_dependencies_missing(
+            b"error: no matching package named `invalid_name` found\nlocation searched: crates.io index"
+        ));
+    }
 }

@@ -1622,7 +1622,7 @@ pub fn extract(options: &Options, output: &Path) -> Result<()> {
             &host.workspace,
             cache,
             &baseline,
-            host.command("cargo"),
+            || host.command("cargo"),
         )?)
     } else {
         ensure!(
