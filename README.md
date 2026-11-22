@@ -1,8 +1,8 @@
 # Bevy CI/CD
 
-供 Bevy 项目调用的 GitHub Actions 工作流。Rust 检查和 ECS 规则读取调用方的 Cargo 项目，架构发布使用调用方已经构建的静态站点。
+供 Bevy 项目调用的 GitHub Actions 工作流。Rust 检查和 ECS 规则读取调用方的 Cargo 项目。ECS 架构工作流使用调用方的项目源码和应用导出的调度信息构建并校验静态站点，再由发布工作流部署到 GitHub Pages。
 
-示例通过发布标签引用所需的工作流。需要固定依赖时，将标签替换为对应的完整提交 SHA。调用方须允许使用公开的 GitHub.com Actions 工作流。[GitHub 跨仓库复用说明](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
+示例从 `main` 分支引用共享工作流。需要固定依赖时，将 `main` 替换为完整的提交 SHA。调用方须允许使用公开的 GitHub.com Actions 工作流。[GitHub 跨仓库复用说明](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
 
 ## Rust 检查
 
@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   rust:
-    uses: fedoraiver/bevy-cicd/.github/workflows/rust-checks.yml@v1.0.0
+    uses: fedoraiver/bevy-cicd/.github/workflows/rust-checks.yml@main
 ```
 
 工作流从 `project-path`（默认 `.`）运行 Cargo，支持该路径或其上级目录声明的 rustup 工具链。未声明工具链时使用 `stable`。工作流为 Ubuntu 安装 Bevy 常见的窗口和音频编译依赖，依次运行格式检查、`cargo check`、Clippy 和串行测试。Clippy 开启 `pedantic` 警告。设置 `features`（例如 `debugdump` 或 `foo,bar`）会额外检查和测试该配置。
@@ -33,7 +33,7 @@ jobs:
 
 ```yaml
   bevy-rules:
-    uses: fedoraiver/bevy-cicd/.github/workflows/bevy-rules.yml@v1.0.0
+    uses: fedoraiver/bevy-cicd/.github/workflows/bevy-rules.yml@main
     with:
       package-path: .
 ```
@@ -49,7 +49,7 @@ jobs:
 debugdump = ["dep:bevy-schedule-export", "bevy/debug"]
 
 [dependencies]
-bevy-schedule-export = { git = "https://github.com/fedoraiver/bevy-cicd.git", tag = "v1.1.0", optional = true }
+bevy-schedule-export = { git = "https://github.com/fedoraiver/bevy-cicd.git", optional = true }
 ```
 
 导出入口注册和装配项目的实际插件，调用下面的函数后退出。正常启动仍使用项目自己的运行入口。导出函数写入主世界及子世界的运行时记录和调度 DOT。
@@ -78,12 +78,12 @@ permissions:
 
 jobs:
   build:
-    uses: fedoraiver/bevy-cicd/.github/workflows/architecture-build.yml@v1.1.0
+    uses: fedoraiver/bevy-cicd/.github/workflows/architecture-build.yml@main
 
   publish:
     needs: build
     if: ${{ github.event_name != 'pull_request' }}
-    uses: fedoraiver/bevy-cicd/.github/workflows/architecture-pages.yml@v1.1.0
+    uses: fedoraiver/bevy-cicd/.github/workflows/architecture-pages.yml@main
     permissions:
       contents: read
       actions: read
@@ -118,7 +118,7 @@ jobs:
       ARCHITECTURE_ARTIFACT: architecture-${{ github.run_id }}-${{ github.run_attempt }}
       SITE: tmp/site
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@main
         with:
           persist-credentials: false
       - name: Generate and validate site
@@ -128,12 +128,12 @@ jobs:
           index_sha=$(sha256sum "$SITE/index.html" | cut -d ' ' -f 1)
           jq -n --arg commit "$GITHUB_SHA" --arg hash "$index_sha" \
             '{commit: $commit, index_sha256: $hash}' > "$SITE/bevy-cicd-build.json"
-      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+      - uses: actions/upload-pages-artifact@main
         with:
           name: ${{ env.ARCHITECTURE_ARTIFACT }}
           path: ${{ env.SITE }}
           retention-days: 3
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@main
         with:
           name: ${{ env.ARCHITECTURE_ARTIFACT }}-proof
           path: ${{ env.SITE }}/bevy-cicd-build.json
@@ -142,7 +142,7 @@ jobs:
 
   publish:
     needs: build
-    uses: fedoraiver/bevy-cicd/.github/workflows/architecture-pages.yml@v1.0.0
+    uses: fedoraiver/bevy-cicd/.github/workflows/architecture-pages.yml@main
     permissions:
       contents: read
       actions: read

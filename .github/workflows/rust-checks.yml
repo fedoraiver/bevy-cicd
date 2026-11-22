@@ -30,7 +30,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - name: Check out caller
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@main
         with:
           persist-credentials: false
 
@@ -86,7 +86,7 @@ jobs:
             libxkbcommon-x11-0 libwayland-dev libxkbcommon-dev
 
       - name: Cache Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        uses: actions/cache@main
         with:
           path: |
             ~/.cargo/registry/cache
