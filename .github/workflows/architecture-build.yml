@@ -127,7 +127,7 @@ jobs:
         if: ${{ always() }}
         run: |
           mkdir -p project/tmp/ecs-architecture
-          node bevy-cicd/tools/ecs-diagrams/maintain.mjs report --format markdown > project/tmp/ecs-architecture/maintenance-summary.md
+          npm run --silent maintain --prefix bevy-cicd/tools/ecs-diagrams -- report --format markdown > project/tmp/ecs-architecture/maintenance-summary.md
           cat project/tmp/ecs-architecture/maintenance-summary.md | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Preserve extraction and rendering evidence
