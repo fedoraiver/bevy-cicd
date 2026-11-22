@@ -160,6 +160,7 @@ jobs:
         with:
           name: ${{ env.PAGES_ARTIFACT_NAME }}
           path: ${{ env.PAGES_DIR }}
+          include-hidden-files: true
           retention-days: 3
 
       - name: Upload publication proof
