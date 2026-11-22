@@ -157,6 +157,30 @@ test('export provenance, filenames and file presence are verified', t => {
   assert.throws(() => readDebugdump(repository, repository), /Missing debugdump DOT/);
 });
 
+test('shared launcher provenance uses the exporter lock and the caller fingerprint', async t => {
+  const { repository, manifest, save } = fixture(t);
+  fs.writeFileSync(path.join(repository, 'Cargo.lock'), '[[package]]\nname = "bevy"\nversion = "0.20.0"\n');
+  manifest.sourceFingerprint = sourceFingerprint(repository);
+  save();
+  assert.throws(() => readDebugdump(repository, repository), /dependency version mismatch: bevy_mod_debugdump/);
+
+  manifest.exporter = 'shared-launcher';
+  save();
+  const result = await compileDebugdump(readDebugdump(repository, repository));
+  assert.equal(result.manifest.exporter, 'shared-launcher');
+
+  manifest.bevyVersion = '0.21.0';
+  save();
+  assert.throws(() => readDebugdump(repository, repository), /dependency version mismatch: bevy$/);
+  manifest.bevyVersion = '0.20.0';
+  manifest.debugdumpVersion = '0.16.0';
+  save();
+  assert.throws(() => readDebugdump(repository, repository), /dependency version mismatch: bevy_mod_debugdump/);
+  manifest.exporter = 'unknown';
+  save();
+  assert.throws(() => readDebugdump(repository, repository), /Unsupported debugdump exporter/);
+});
+
 test('SVG normalization keeps native geometry and rejects executable or external content', () => {
   const contents = '<svg xmlns="http://www.w3.org/2000/svg" width="20pt" height="10pt" viewBox="0 0 20 10"><path d="M1,2 L3,4"/></svg>';
   const normalized = normalizeScheduleSvg(contents, 'schedule-example');

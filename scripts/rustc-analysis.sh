@@ -3,6 +3,7 @@ set -euo pipefail
 
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 tool_manifest="$project_root/tools/rustc-analysis/Cargo.toml"
+exporter_manifest="$project_root/tools/bevy-schedule-export/Cargo.toml"
 cd "$project_root"
 
 # Build and run the driver with the compiler pinned by this repository.
@@ -25,9 +26,12 @@ build_tool() {
 }
 
 case "${1-}" in
-  prepare)
+  prepare|prepare-architecture)
     package=$(cd -- "$2" && pwd -P)
     build_tool
+    if [[ "$1" == prepare-architecture ]]; then
+      cargo fetch --locked --manifest-path "$exporter_manifest"
+    fi
     # The analyzer loads the complete locked dependency graph offline.
     cd "$package"
     cargo fetch --locked
@@ -37,6 +41,8 @@ case "${1-}" in
     ;;
   test)
     cargo fetch --locked --manifest-path "$project_root/tests/fixtures/bevy-rules/Cargo.toml"
+    cargo fetch --locked --manifest-path "$exporter_manifest"
+    cargo fetch --locked --manifest-path "$project_root/tools/rustc-analysis/runner/tests/fixtures/schedule-app/Cargo.toml"
     build_tool
     cargo fmt --manifest-path "$tool_manifest" --all -- --check
     cargo test --locked --manifest-path "$tool_manifest" --workspace -- --test-threads=1
@@ -50,7 +56,7 @@ case "${1-}" in
     done
     ;;
   *)
-    echo 'Usage: rustc-analysis.sh prepare PACKAGE | {check|extract|model} [ARGS] | test' >&2
+    echo 'Usage: rustc-analysis.sh {prepare|prepare-architecture} PACKAGE | {check|extract|model} [ARGS] | test' >&2
     exit 2
     ;;
 esac

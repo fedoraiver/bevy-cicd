@@ -316,6 +316,19 @@ test('Maintenance helper content invalidates downstream reuse while installed de
   assert.equal(fs.readFileSync(path.join(f.workspace, 'executions.txt'), 'utf8'), 'dependencies\nproduce\nverify\nproduce\nverify\n');
 });
 
+test('shared exporter source and lock participate in maintenance inputs', t => {
+  const f = fixture(t);
+  const manifest = 'tools/bevy-schedule-export/Cargo.toml', lock = 'tools/bevy-schedule-export/Cargo.lock';
+  const source = 'tools/bevy-schedule-export/src/lib.rs';
+  f.put(manifest, '[package]');
+  f.put(lock, 'version = 4');
+  f.put(source, 'pub fn dump_schedules() {}');
+  const names = relevantInputNames(f.workspace), before = fileSnapshot(f.workspace, names);
+  for (const name of [manifest, lock, source]) assert.equal(typeof before[name], 'string', name);
+  f.put(source, 'pub fn dump_schedules() -> usize { 1 }');
+  assert.notEqual(fileSnapshot(f.workspace, names)[source], before[source]);
+});
+
 test('full run refuses a different worktree before creating execution records', async t => {
   const f = fixture(t);
   await assert.rejects(runMaintenance({ workspace: f.workspace }), /entry point from the selected workspace/);

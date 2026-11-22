@@ -83,6 +83,18 @@ pub fn extract_with_origins(
     tcx: TyCtxt<'_>,
     origins: &[analysis_contract::PackageOrigin],
 ) -> Result<UnitFacts> {
+    extract_for_project(
+        tcx,
+        origins,
+        std::env::var_os("CARGO_PRIMARY_PACKAGE").is_some(),
+    )
+}
+
+pub(crate) fn extract_for_project(
+    tcx: TyCtxt<'_>,
+    origins: &[analysis_contract::PackageOrigin],
+    project: bool,
+) -> Result<UnitFacts> {
     let traits = tcx
         .all_traits_including_private()
         .filter_map(|id| {
@@ -118,7 +130,7 @@ pub fn extract_with_origins(
         assignments: HashMap::new(),
         bundle_engine: crate::entity::analysis::resolver(tcx, true),
     };
-    if collector.trait_ids.is_empty() && std::env::var_os("CARGO_PRIMARY_PACKAGE").is_none() {
+    if collector.trait_ids.is_empty() && !project {
         for file in tcx.sess.source_map().files().iter() {
             collector.fingerprint(&file.name.prefer_local_unconditionally().to_string());
         }
@@ -189,7 +201,9 @@ pub fn extract_with_origins(
     collector.index_hir_templates();
     collector.seed_native_system_instances();
     collector.collect_mir_instances();
-    collector.collect_entity_templates()?;
+    if project {
+        collector.collect_entity_templates()?;
+    }
     // include!、过程宏实际加载的文件也参与内容指纹，不能只枚举 src/。
     for file in tcx.sess.source_map().files().iter() {
         let filename = file.name.prefer_local_unconditionally().to_string();
@@ -1909,9 +1923,6 @@ impl<'tcx> Collector<'tcx> {
 
     fn collect_entity_templates(&mut self) -> Result<()> {
         // 名称检查器的值流引擎同时输出结构，确保 BSN、Bundle 与 required 使用同一解释。
-        if std::env::var_os("CARGO_PRIMARY_PACKAGE").is_none() {
-            return Ok(());
-        }
         let structures = crate::entity::analysis::structures(self.tcx)?;
         let mut sites: HashMap<String, HashMap<Span, usize>> = HashMap::new();
         let mut groups: Vec<(

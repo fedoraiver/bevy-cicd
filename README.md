@@ -42,25 +42,24 @@ jobs:
 
 ## 生成并发布 ECS 架构图
 
-把项目的 App 装配复用于 `--dump-schedules <directory>` 入口，并通过 `debugdump` feature 启用导出。下面的 Cargo 配置适用于 Bevy 0.20。合并到项目现有的 `[features]` 与 `[dependencies]`，并提交更新后的 `Cargo.lock`。
-
-```toml
-[features]
-debugdump = ["dep:bevy-schedule-export", "bevy/debug"]
-
-[dependencies]
-bevy-schedule-export = { git = "https://github.com/fedoraiver/bevy-cicd.git", optional = true }
-```
-
-导出入口注册和装配项目的实际插件，调用下面的函数后退出。正常启动仍使用项目自己的运行入口。导出函数写入主世界及子世界的运行时记录和调度 DOT。
+对于使用 Bevy 0.20 的根 Cargo 包，在库根公开无参数的 `build_app`，复用游戏启动时的插件装配。下面的示例假定 `configure` 负责注册项目的真实插件。
 
 ```rust
-bevy_schedule_export::dump_schedules(
-    &mut app,
-    &output_directory,
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
-)?;
+pub fn build_app() -> bevy::prelude::App {
+    let mut app = bevy::prelude::App::new();
+    configure(&mut app);
+    app
+}
 ```
+
+在项目的 `Cargo.toml` 声明 App 构造接口，并提交项目的 `Cargo.lock`。
+
+```toml
+[package.metadata.bevy-architecture]
+app-factory = "build_app"
+```
+
+共享工作流在自己的构建目录内生成启动器，通过 Cargo 路径依赖调用该函数，并在插件就绪后导出主应用和子应用的运行时记录与调度 DOT。旧项目可继续使用已有的 `debugdump` feature 和 `--dump-schedules <directory>` 入口。迁移时加入上面的构造函数和声明，再移除旧入口及其导出依赖。
 
 在调用仓库的 **Settings → Pages** 将源设为 **GitHub Actions**。下面的工作流在 PR 中生成并校验站点，在默认分支合入后上线。将 `branches` 中的 `main` 改为项目实际的默认分支。
 
@@ -93,7 +92,7 @@ jobs:
       artifact-name: ${{ needs.build.outputs.artifact-name }}
 ```
 
-构建按固定 Rust 和 Node 依赖分析调用仓库根目录的 Cargo 二进制，提取编译器事实，执行调度导出，生成并检查 ECS 可视化站点。运行证据以 `ecs-evidence-<run>-<attempt>` 产物保留。
+构建按固定 Rust 和 Node 依赖提取编译器事实、执行调度导出，并生成和检查 ECS 可视化站点。使用 App 构造函数的项目从同一轮编译取得项目库的事实和启动器二进制。运行证据以 `ecs-evidence-<run>-<attempt>` 产物保留。参见[共享调度导出启动器决策](docs/adr/0001-shared-schedule-launcher.md)。
 
 ## 发布自定义架构站点
 

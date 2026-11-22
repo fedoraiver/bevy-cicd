@@ -1,5 +1,6 @@
 //! Cargo 编译单元与分析报告共同构成成功条件；缓存只复用内容仍匹配的依赖事实。
 use crate::{
+    launcher::{self, Launcher},
     report_cache::{AnalysisLock, CachedReport, ReportCache, inputs_key},
     unit_binding::{self, Hashes},
     unit_graph::UnitGraph,
@@ -56,18 +57,12 @@ struct CargoTarget {
     kind: Vec<String>,
 }
 
-fn package_origins(metadata: &serde_json::Value) -> Result<Vec<PackageOrigin>> {
-    let workspace = Path::new(
-        metadata["workspace_root"]
-            .as_str()
-            .context("Missing Cargo workspace root")?,
-    )
-    .canonicalize()?;
+fn package_origins(metadata: &serde_json::Value, workspace: &Path) -> Result<Vec<PackageOrigin>> {
     metadata["packages"].as_array().context("Missing Cargo packages")?.iter().map(|package| {
         let manifest = Path::new(package["manifest_path"].as_str().context("Missing Cargo manifest")?);
         let root = manifest.parent().context("Cargo manifest has no parent")?.canonicalize()?;
         let source = package["source"].as_str().map(str::to_owned).unwrap_or_else(|| {
-            match root.strip_prefix(&workspace) {
+            match root.strip_prefix(workspace) {
                 Ok(relative) => format!("workspace:{}", relative.to_string_lossy().replace('\\', "/")),
                 Err(_) => format!("path:{}", root.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/")),
             }
@@ -244,6 +239,7 @@ struct FactBundle {
 
 struct Host {
     root: PathBuf,
+    workspace: PathBuf,
     cache: PathBuf,
     directory: PathBuf,
     target_dir: PathBuf,
@@ -341,13 +337,12 @@ impl Host {
             String::from_utf8_lossy(&location.stderr)
         );
         let workspace_manifest = PathBuf::from(String::from_utf8(location.stdout)?.trim());
-        let workspace = normalized(
-            workspace_manifest
-                .parent()
-                .context("Cargo workspace manifest has no parent")?,
-        )?;
+        let workspace = workspace_manifest
+            .parent()
+            .context("Cargo workspace manifest has no parent")?
+            .canonicalize()?;
         // 不同 workspace 的锁文件与稳定分析配置独立，避免共用 unit 的 token 相互替换。
-        let slot = digest(workspace.as_bytes());
+        let slot = digest(normalized(&workspace)?.as_bytes());
         let analysis = cache
             .join(format!(
                 "{}-v{}",
@@ -367,6 +362,7 @@ impl Host {
         }
         Ok(Self {
             root,
+            workspace,
             cache,
             directory,
             target_dir,
@@ -440,6 +436,7 @@ impl Host {
         recovered: &mut BTreeSet<String>,
         lock_root: &Path,
         lock_digest: &str,
+        launcher: Option<&Launcher>,
     ) -> Result<()> {
         ensure!(
             !missing.is_empty() && missing.is_disjoint(recovered),
@@ -448,6 +445,11 @@ impl Host {
         for id in missing {
             let mut clean = self.command("cargo");
             clean.args(["clean", "--quiet", "--locked", "-p", id]);
+            if let Some(launcher) = launcher {
+                clean
+                    .args(["--offline", "--manifest-path"])
+                    .arg(&launcher.manifest);
+            }
             if let Some(target) = options
                 .target
                 .as_deref()
@@ -468,11 +470,25 @@ impl Host {
         Ok(())
     }
 
-    fn compile(&self, options: &Options, rule: Rule, full_metadata: bool) -> Result<Compilation> {
+    fn compile(
+        &self,
+        options: &Options,
+        rule: Rule,
+        launcher: Option<&Launcher>,
+    ) -> Result<Compilation> {
         let started = Instant::now();
-        let metadata = self.metadata(options, full_metadata)?;
+        let native_metadata;
+        let metadata = if let Some(launcher) = launcher {
+            &launcher.metadata
+        } else {
+            native_metadata = self.metadata(options, true)?;
+            &native_metadata
+        };
         let packages: Vec<Package> = serde_json::from_value(metadata["packages"].clone())?;
-        let manifest = self.root.join("Cargo.toml").canonicalize()?;
+        let manifest = match launcher {
+            Some(launcher) => launcher.manifest.canonicalize()?,
+            None => self.root.join("Cargo.toml").canonicalize()?,
+        };
         let package = packages
             .iter()
             .find(|package| package.manifest_path.canonicalize().ok().as_ref() == Some(&manifest))
@@ -564,13 +580,20 @@ impl Host {
         } else {
             &lock_root
         };
-        let configuration = digest(serde_json::to_vec(&serde_json::json!({
+        let mut configuration = serde_json::json!({
             "schemaVersion": ANALYSIS_SCHEMA_VERSION, "incremental":true,
             "workspace":normalized(report_scope)?,"target": options.target.as_deref().unwrap_or(&self.host),
             "features":options.features.iter().collect::<BTreeSet<_>>(),"allFeatures":options.all_features,"rule":rule,
             "compiler":env!("ANALYSIS_COMPILER"),"driver":file_digest(&self.driver)?,
             "lock":lock_digest,"cargo":native_configuration,"environment":relevant_environment
-        }))?);
+        });
+        if let Some(launcher) = launcher {
+            configuration["launcher"] = serde_json::json!({
+                "manifest": file_digest(&launcher.manifest)?,
+                "sourceLock": launcher.source_lock_digest,
+            });
+        }
+        let configuration = digest(serde_json::to_vec(&configuration)?);
         let request = Request {
             schema_version: ANALYSIS_SCHEMA_VERSION,
             run: self.run.clone(),
@@ -580,7 +603,7 @@ impl Host {
             rule,
             sources,
             manifest_dirs: BTreeSet::from([normalized(&self.root)?]),
-            package_origins: package_origins(&metadata)?,
+            package_origins: package_origins(metadata, &self.workspace)?,
         };
         let request_path = self
             .directory
@@ -638,11 +661,17 @@ impl Host {
             {
                 command.args(["--target", target]);
             }
-            if !options.features.is_empty() {
-                command.args(["--features", &options.features.join(",")]);
-            }
-            if options.all_features {
-                command.arg("--all-features");
+            if let Some(launcher) = launcher {
+                command
+                    .args(["--offline", "--manifest-path"])
+                    .arg(&launcher.manifest);
+            } else {
+                if !options.features.is_empty() {
+                    command.args(["--features", &options.features.join(",")]);
+                }
+                if options.all_features {
+                    command.arg("--all-features");
+                }
             }
             command
         };
@@ -1045,6 +1074,7 @@ impl Host {
                         &mut recovered,
                         &lock_root,
                         &lock_digest,
+                        launcher,
                     )?;
                     continue;
                 }
@@ -1250,7 +1280,14 @@ impl Host {
                     summary,
                 });
             }
-            self.recover_packages(options, &missing, &mut recovered, &lock_root, &lock_digest)?;
+            self.recover_packages(
+                options,
+                &missing,
+                &mut recovered,
+                &lock_root,
+                &lock_digest,
+                launcher,
+            )?;
         }
         unreachable!()
     }
@@ -1488,7 +1525,7 @@ pub fn check_named_fields(options: &Options) -> Result<named_fields::Report> {
         .context("Missing cache parent")?
         .to_path_buf();
     let mut locks = BTreeMap::from([(directory.clone(), AnalysisLock::acquire(&directory)?)]);
-    let result = host.compile(options, Rule::NamedFields, true)?;
+    let result = host.compile(options, Rule::NamedFields, None)?;
     let mut report = named_fields::Report {
         configuration: result.configuration,
         ..Default::default()
@@ -1529,7 +1566,7 @@ pub fn check_named_fields(options: &Options) -> Result<named_fields::Report> {
         let (nested, nested_host) = nested_checks[index]
             .take()
             .expect("Each nested check is ordered once");
-        let result = nested_host.compile(&nested, Rule::NamedFields, true)?;
+        let result = nested_host.compile(&nested, Rule::NamedFields, None)?;
         for unit in result.reports {
             report.compilations += 1;
             report.add(named_fields::Envelope {
@@ -1549,7 +1586,7 @@ pub fn check_named_fields(options: &Options) -> Result<named_fields::Report> {
 pub fn check_entity_names(options: &Options) -> Result<entity_names::Report> {
     let host = Host::new(options, Rule::EntityNames)?;
     let _lock = AnalysisLock::acquire(host.target_dir.parent().context("Missing cache parent")?)?;
-    let result = host.compile(options, Rule::EntityNames, true)?;
+    let result = host.compile(options, Rule::EntityNames, None)?;
     let mut report = entity_names::Report {
         configuration: result.configuration,
         ..Default::default()
@@ -1561,35 +1598,56 @@ pub fn check_entity_names(options: &Options) -> Result<entity_names::Report> {
     Ok(report)
 }
 
-/// 构建带分析的真实应用，再只执行允许的 Schedule 专用导出入口。
+/// 构建带分析的真实应用，再执行共享 launcher 或旧版专用导出入口。
 pub fn extract(options: &Options, output: &Path) -> Result<()> {
-    let mut selected = options.clone();
-    if !selected
-        .features
-        .iter()
-        .any(|feature| feature == "debugdump")
-    {
-        selected.features.push("debugdump".into());
-    }
-    let host = Host::new(&selected, Rule::Architecture)?;
+    let host = Host::new(options, Rule::Architecture)?;
     ensure!(
-        selected
+        options
             .target
             .as_deref()
             .is_none_or(|target| target == host.host),
         "A runtime Schedule snapshot must be exported on its native target; cross-target checks do not execute binaries"
     );
-    let _lock = AnalysisLock::acquire(host.target_dir.parent().context("Missing cache parent")?)?;
+    let cache = host.target_dir.parent().context("Missing cache parent")?;
+    let _lock = AnalysisLock::acquire(cache)?;
     let source_origins = host.source_origins()?;
-    let result = host.compile(&selected, Rule::Architecture, true)?;
-    publish_extraction(&host, source_origins, result, output)
+    let metadata = host.metadata(&Options::new(host.root.clone()), false)?;
+    let caller = launcher::caller_package(&metadata, &host.root)?;
+    let mut selected = options.clone();
+    selected.root = host.root.clone();
+    let launcher = if launcher::uses_launcher(caller)? {
+        let baseline = host.metadata(&selected, true)?;
+        Some(Launcher::prepare(
+            &selected,
+            &host.workspace,
+            cache,
+            &baseline,
+            host.command("cargo"),
+        )?)
+    } else {
+        ensure!(
+            caller["features"].get("debugdump").is_some(),
+            "Declare [package.metadata.bevy-architecture] app-factory = \"build_app\" and expose the App factory in the project library"
+        );
+        if !selected
+            .features
+            .iter()
+            .any(|feature| feature == "debugdump")
+        {
+            selected.features.push("debugdump".into());
+        }
+        None
+    };
+    let result = host.compile(&selected, Rule::Architecture, launcher.as_ref())?;
+    publish_extraction(&host, source_origins, result, output, launcher.as_ref())
 }
 
 fn publish_extraction(
     host: &Host,
     source_origins: Vec<serde_json::Value>,
-    result: Compilation,
+    mut result: Compilation,
     output: &Path,
+    launcher: Option<&Launcher>,
 ) -> Result<()> {
     fs::create_dir_all(output)?;
     let output = output.canonicalize()?;
@@ -1599,15 +1657,33 @@ fn publish_extraction(
     let debugdump = staging.join("debugdump");
     let executable = result
         .executable
-        .context("Architecture extraction requires a production binary target")?;
-    let status = Command::new(&executable)
+        .context("Architecture extraction requires a dedicated executable")?;
+    let mut command = Command::new(&executable);
+    command
         .current_dir(&host.root)
         .env("BEVY_ASSET_ROOT", &host.root)
-        .env("PATH", &result.environment_path)
-        .arg("--dump-schedules")
-        .arg(&debugdump)
-        .status()?;
+        .env("PATH", &result.environment_path);
+    let launcher_root = if let Some(launcher) = launcher {
+        command
+            .arg(&debugdump)
+            .arg(&host.root)
+            .arg(launcher.root.join("Cargo.lock"));
+        let launcher_id = &launcher.metadata["resolve"]["root"];
+        result
+            .packages
+            .as_array_mut()
+            .context("Missing compiler packages")?
+            .retain(|package| &package["id"] != launcher_id);
+        Some(normalized(&launcher.root)?)
+    } else {
+        command.arg("--dump-schedules").arg(&debugdump);
+        None
+    };
+    let status = command.status()?;
     ensure!(status.success(), "Dedicated Schedule export failed");
+    if let Some(launcher) = launcher {
+        launcher.verify_source_lock()?;
+    }
     preserve_schedule_snapshot(&debugdump, &output)?;
     fs::copy(debugdump.join("runtime.json"), staging.join("runtime.json"))?;
     fs::write(
@@ -1618,6 +1694,9 @@ fn publish_extraction(
     let mut project_units = BTreeSet::new();
     let mut units = Vec::with_capacity(result.reports.len());
     for report in result.reports {
+        if launcher_root.as_ref() == Some(&report.manifest_dir) {
+            continue;
+        }
         let unit = report
             .facts
             .context("Selected architecture unit has no facts")?;
@@ -2159,6 +2238,7 @@ mod tests {
         fs::create_dir(&run).unwrap();
         let host = Host {
             root: directory.clone(),
+            workspace: directory.clone(),
             cache: directory.clone(),
             directory: run,
             target_dir: directory.clone(),
@@ -2179,7 +2259,7 @@ mod tests {
             environment_path: host.path.clone(),
             summary: serde_json::json!({}),
         };
-        assert!(publish_extraction(&host, vec![], result, &output).is_err());
+        assert!(publish_extraction(&host, vec![], result, &output, None).is_err());
         assert_eq!(
             fs::read(output.join("debugdump/manifest.json")).unwrap(),
             before
@@ -2672,17 +2752,17 @@ mod tests {
                 ]
             }]
         });
-        let origins = package_origins(&metadata).unwrap();
+        let origins = package_origins(&metadata, &directory).unwrap();
         assert_eq!(origins.len(), 1);
         assert_eq!(origins[0].targets.len(), 1);
         assert_eq!(origins[0].targets[0].source, normalized(&library).unwrap());
         let mut missing_library = metadata.clone();
         missing_library["packages"][0]["targets"][0]["src_path"] =
             serde_json::json!(directory.join("missing.rs"));
-        assert!(package_origins(&missing_library).is_err());
+        assert!(package_origins(&missing_library, &directory).is_err());
         let mut relative_example = metadata;
         relative_example["packages"][0]["targets"][1]["src_path"] =
             serde_json::json!("benches/benchmark.rs");
-        assert!(package_origins(&relative_example).is_err());
+        assert!(package_origins(&relative_example, &directory).is_err());
     }
 }

@@ -32,6 +32,8 @@ struct Manifest {
     schema_version: u32,
     bevy_version: String,
     debugdump_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exporter: Option<&'static str>,
     exported_at: u64,
     target: &'static str,
     features: [&'static str; 1],
@@ -55,15 +57,36 @@ struct ScheduleEntry {
 ///
 /// source_root 指向接受分析的 Cargo 项目，供清单读取锁定版本与源码指纹。
 pub fn dump_schedules(app: &mut App, output: &Path, source_root: &Path) -> DumpResult<usize> {
+    dump_schedules_with_lock(app, output, source_root, None)
+}
+
+/// 从共享启动器导出调用方装配的 App。
+pub mod launcher {
+    use super::{App, DumpResult, Path, dump_schedules_with_lock};
+
+    /// `source_root` 提供调用方的源码指纹，`launcher_lock` 提供实际编译的依赖版本。
+    pub fn dump_schedules(
+        app: &mut App,
+        output: &Path,
+        source_root: &Path,
+        launcher_lock: &Path,
+    ) -> DumpResult<usize> {
+        dump_schedules_with_lock(app, output, source_root, Some(launcher_lock))
+    }
+}
+
+fn dump_schedules_with_lock(
+    app: &mut App,
+    output: &Path,
+    source_root: &Path,
+    launcher_lock: Option<&Path>,
+) -> DumpResult<usize> {
     while app.plugins_state() == PluginsState::Adding {
         bevy_tasks::tick_global_task_pools_on_main_thread();
         std::thread::yield_now();
     }
     app.finish();
-    write_schedules(app, output, source_root)
-}
 
-fn write_schedules(app: &mut App, output: &Path, source_root: &Path) -> DumpResult<usize> {
     fs::create_dir_all(output)?;
     let manifest_path = output.join("manifest.json");
     // 完成全部导出后才发布清单，失败时不能沿用上次成功的清单。
@@ -72,8 +95,20 @@ fn write_schedules(app: &mut App, output: &Path, source_root: &Path) -> DumpResu
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let lockfile: CargoLock = toml::from_str(&fs::read_to_string(source_root.join("Cargo.lock"))?)?;
+    let source_lock = source_root.join("Cargo.lock");
+    let lockfile: CargoLock =
+        toml::from_str(&fs::read_to_string(launcher_lock.unwrap_or(&source_lock))?)?;
     let bevy_version = lockfile.version("bevy")?;
+    if launcher_lock.is_some() {
+        let project: CargoLock = toml::from_str(&fs::read_to_string(source_lock)?)?;
+        let expected = project.version("bevy")?;
+        if bevy_version != expected {
+            return Err(format!(
+                "Launcher locked Bevy {bevy_version}, but the project locked Bevy {expected}"
+            )
+            .into());
+        }
+    }
     let debugdump_version = lockfile.version("bevy_mod_debugdump")?;
     let source_fingerprint = source_fingerprint(source_root)?;
     let mut snapshots = Vec::new();
@@ -96,6 +131,7 @@ fn write_schedules(app: &mut App, output: &Path, source_root: &Path) -> DumpResu
         schema_version: 1,
         bevy_version,
         debugdump_version,
+        exporter: launcher_lock.map(|_| "shared-launcher"),
         exported_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         target: env!("BEVY_SCHEDULE_EXPORT_TARGET"),
         features: ["debugdump"],
@@ -426,8 +462,7 @@ mod tests {
         panic!("Export must not run any systems");
     }
 
-    #[test]
-    fn exports_registered_main_and_sub_app_schedules_without_running_them() {
+    fn fixture_root() -> PathBuf {
         let run = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -437,14 +472,22 @@ mod tests {
             .join(format!("{}-{run}", std::process::id()));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("Cargo.toml"), "[package]\nname = 'fixture'\n").unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        root
+    }
+
+    const PROJECT_LOCK: &str = "version = 4\n[[package]]\nname = 'bevy'\nversion = '0.20.0'\n";
+    const EXPORTER_LOCK_ENTRY: &str =
+        "[[package]]\nname = 'bevy_mod_debugdump'\nversion = '0.17.0'\n";
+
+    #[test]
+    fn exports_registered_main_and_sub_app_schedules_without_running_them() {
+        let root = fixture_root();
         fs::write(
             root.join("Cargo.lock"),
-            "version = 4\n[[package]]\nname = 'bevy'\nversion = '0.20.0'\n\
-             [[package]]\nname = 'bevy_mod_debugdump'\nversion = '0.17.0'\n",
+            format!("{PROJECT_LOCK}{EXPORTER_LOCK_ENTRY}"),
         )
         .unwrap();
-        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
-
         let mut app = App::new();
         app.add_plugins(FinishRegistration);
         let mut sub_app = SubApp::new();
@@ -460,6 +503,7 @@ mod tests {
             serde_json::from_slice(&fs::read(output.join("runtime.json")).unwrap()).unwrap();
         assert_eq!(manifest["bevyVersion"], "0.20.0");
         assert_eq!(manifest["debugdumpVersion"], "0.17.0");
+        assert!(manifest.get("exporter").is_none());
         assert_eq!(manifest["sourceFingerprint"], runtime.source_fingerprint);
         assert_eq!(runtime.schedules.len(), count);
         for app in ["main", "RenderApp"] {
@@ -475,5 +519,44 @@ mod tests {
                 sha256(&fs::read(output.join(&schedule.dot_filename)).unwrap())
             );
         }
+    }
+
+    #[test]
+    fn shared_launcher_uses_its_own_lock_and_original_source_fingerprint() {
+        let root = fixture_root();
+        let source_lock = root.join("Cargo.lock");
+        fs::write(&source_lock, PROJECT_LOCK).unwrap();
+        let launcher_lock = root.join("launcher.lock");
+        fs::write(
+            &launcher_lock,
+            format!("{PROJECT_LOCK}{EXPORTER_LOCK_ENTRY}"),
+        )
+        .unwrap();
+        let output = root.join("output");
+        let mut app = App::new();
+        app.add_systems(Update, never_run);
+        assert!(launcher::dump_schedules(&mut app, &output, &root, &launcher_lock).unwrap() > 0);
+
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(output.join("manifest.json")).unwrap()).unwrap();
+        let runtime: RuntimeSnapshot =
+            serde_json::from_slice(&fs::read(output.join("runtime.json")).unwrap()).unwrap();
+        let fingerprint = source_fingerprint(&root).unwrap();
+        assert_eq!(manifest["exporter"], "shared-launcher");
+        assert_eq!(manifest["bevyVersion"], "0.20.0");
+        assert_eq!(manifest["debugdumpVersion"], "0.17.0");
+        assert_eq!(manifest["sourceFingerprint"], fingerprint);
+        assert_eq!(runtime.source_fingerprint, fingerprint);
+        assert_eq!(fs::read_to_string(source_lock).unwrap(), PROJECT_LOCK);
+
+        fs::write(
+            &launcher_lock,
+            format!("{PROJECT_LOCK}{EXPORTER_LOCK_ENTRY}").replace("0.20.0", "0.21.0"),
+        )
+        .unwrap();
+        let error =
+            launcher::dump_schedules(&mut App::new(), &output, &root, &launcher_lock).unwrap_err();
+        assert!(error.to_string().contains("Launcher locked Bevy 0.21.0"));
+        assert!(!output.join("manifest.json").exists());
     }
 }

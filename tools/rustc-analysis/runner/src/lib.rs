@@ -2,6 +2,7 @@
 #[cfg(test)]
 mod cache_tests;
 pub mod host;
+mod launcher;
 pub mod model;
 mod report_cache;
 mod unit_binding;

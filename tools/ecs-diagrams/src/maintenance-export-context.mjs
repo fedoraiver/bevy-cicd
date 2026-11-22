@@ -33,7 +33,7 @@ const identity = filename => {
   const resolved = fs.realpathSync(executablePath(filename));
   return { path: resolved, sha256: digest(fs.readFileSync(resolved)) };
 };
-const dumpProof = manifest => ({ sourceFingerprint: manifest.sourceFingerprint, bevyVersion: manifest.bevyVersion, debugdumpVersion: manifest.debugdumpVersion,
+const dumpProof = manifest => ({ sourceFingerprint: manifest.sourceFingerprint, bevyVersion: manifest.bevyVersion, debugdumpVersion: manifest.debugdumpVersion, exporter: manifest.exporter,
   exportedAt: manifest.exportedAt, target: manifest.target, features: manifest.features,
   schedules: manifest.schedules.map(entry => ({ id: entry.id, app: entry.app, label: entry.label, systemCount: entry.systemCount, sha256: entry.sha256 })) });
 

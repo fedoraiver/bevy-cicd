@@ -65,7 +65,7 @@ jobs:
           echo "MERMAID_RENDER_CONTEXT=$(sha256sum project/tmp/ecs-architecture/render-fonts.txt | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
       - name: Prepare the compiler and locked Rust dependencies
-        run: bash bevy-cicd/scripts/rustc-analysis.sh prepare "$BEVY_ARCHITECTURE_WORKSPACE"
+        run: bash bevy-cicd/scripts/rustc-analysis.sh prepare-architecture "$BEVY_ARCHITECTURE_WORKSPACE"
 
       - name: Prepare Node
         uses: actions/setup-node@main

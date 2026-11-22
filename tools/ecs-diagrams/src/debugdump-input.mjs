@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { toolRepositoryRoot } from './paths.mjs';
 
 export const DEBUGDUMP_MANIFEST = 'debugdump-manifest.json';
 export const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -34,11 +35,17 @@ function lockedVersion(root, name) {
 /** 在任何正式产物写入之前核实来源与所有 DOT；失败不复用旧图。 */
 export function readDebugdump(directory, root, filename = 'manifest.json') {
   const manifestPath = path.join(directory, filename);
-  requireCondition(fs.existsSync(manifestPath), `Missing debugdump manifest: ${manifestPath}. Run cargo run --locked --features debugdump -- --dump-schedules tmp/debugdump, then build with --debugdump tmp/debugdump`);
+  requireCondition(fs.existsSync(manifestPath), `Missing debugdump manifest: ${manifestPath}. Run the shared architecture extractor, then build with --debugdump pointing to its debugdump directory`);
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   requireCondition(manifest.schemaVersion === 1, 'Unsupported debugdump manifest schema');
-  for (const [field, crate] of [['bevyVersion', 'bevy'], ['debugdumpVersion', 'bevy_mod_debugdump']]) {
-    requireCondition(manifest[field] === lockedVersion(root, crate), `Debugdump dependency version mismatch: ${crate}`);
+  requireCondition(manifest.exporter === undefined || manifest.exporter === 'shared-launcher', 'Unsupported debugdump exporter');
+  const exporterRoot = manifest.exporter === 'shared-launcher' ? path.join(toolRepositoryRoot, 'tools/bevy-schedule-export') : root;
+  for (const [field, crate, lockRoot] of [
+    ['bevyVersion', 'bevy', root],
+    ['debugdumpVersion', 'bevy_mod_debugdump', exporterRoot],
+  ]) {
+    const version = lockedVersion(lockRoot, crate);
+    requireCondition(version && manifest[field] === version, `Debugdump dependency version mismatch: ${crate}`);
   }
   requireCondition(manifest.sourceFingerprint === sourceFingerprint(root), 'Debugdump source fingerprint is stale; run the export command again');
   requireCondition(Number.isSafeInteger(manifest.exportedAt) && manifest.exportedAt >= 0 && typeof manifest.target === 'string' && manifest.target.length > 0, 'Invalid debugdump provenance');

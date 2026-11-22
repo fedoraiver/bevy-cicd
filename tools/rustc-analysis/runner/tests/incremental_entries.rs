@@ -1863,3 +1863,126 @@ fn adding_a_previously_absent_module_alternative_cannot_reuse_a_successful_repor
     let diagnostic = String::from_utf8_lossy(&child.stderr);
     assert!(diagnostic.contains("E0761"), "{diagnostic}");
 }
+
+#[test]
+fn shared_launcher_exports_the_callers_locked_app_and_keeps_entity_templates() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Facts {
+        executable_sha256: String,
+        runtime_sha256: String,
+        packages: Vec<Value>,
+        project_units: Vec<String>,
+        units: Vec<Unit>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Unit {
+        crate_name: String,
+        crate_identity: String,
+        entities: Vec<analysis_contract::facts::EntityTemplate>,
+    }
+
+    let _serial = host_test_guard();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schedule-app");
+    let manifest = fs::read(fixture.join("Cargo.toml")).unwrap();
+    let lock = fs::read(fixture.join("Cargo.lock")).unwrap();
+    let output = repository().join("tmp/ra/tests/shared-launcher");
+    let mut options = Options::new(fixture.clone());
+    options.driver = Some(driver());
+    let package = "bevy-cicd-schedule-launcher";
+    let before = package_summaries(package);
+    extract(&options, &output).unwrap();
+    let run = new_package_run(package, &before);
+
+    let attempt = count(&run, "attempts") - 1;
+    let messages = fs::read_to_string(
+        run.directory
+            .join(format!("{package}-{attempt}.stdout.jsonl")),
+    )
+    .unwrap();
+    let executable = messages
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|message| {
+            message["reason"] == "compiler-artifact"
+                && message["target"]["name"] == package
+                && message["executable"].is_string()
+        })
+        .unwrap();
+    let executable = executable["executable"].as_str().unwrap();
+    let facts: Facts = serde_json::from_reader(std::io::BufReader::new(
+        fs::File::open(output.join("facts.json")).unwrap(),
+    ))
+    .unwrap();
+    let runtime = fs::read(output.join("runtime.json")).unwrap();
+    assert_eq!(
+        facts.executable_sha256,
+        format!("{:x}", Sha256::digest(fs::read(executable).unwrap()))
+    );
+    assert_eq!(
+        facts.runtime_sha256,
+        format!("{:x}", Sha256::digest(&runtime))
+    );
+    assert!(
+        !facts
+            .packages
+            .iter()
+            .any(|package| package["name"] == "bevy-cicd-schedule-launcher")
+    );
+    let caller = facts
+        .units
+        .iter()
+        .find(|unit| unit.crate_name == "schedule_app_fixture")
+        .unwrap();
+    assert_eq!(facts.project_units, [caller.crate_identity.as_str()]);
+    assert!(caller.entities.iter().any(|entity| {
+        entity
+            .name_candidates
+            .iter()
+            .any(|candidate| candidate.value.as_deref() == Some("fixture entity"))
+    }));
+
+    let snapshot: Value = serde_json::from_slice(&runtime).unwrap();
+    assert!(
+        snapshot["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|schedule| {
+                schedule["app"] == "main"
+                    && schedule["label"] == "Update"
+                    && schedule["systems"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|system| {
+                            system["name"]
+                                .as_str()
+                                .unwrap()
+                                .ends_with("registered_system")
+                        })
+            })
+    );
+    let dump = output.join("debugdump/manifest.json");
+    let first_dump = fs::read(&dump).unwrap();
+    let exported: Value = serde_json::from_slice(&first_dump).unwrap();
+    assert_eq!(exported["exporter"], "shared-launcher");
+    assert_eq!(exported["bevyVersion"], "0.20.0");
+    rustc_analysis::model::build(
+        &output.join("facts.json"),
+        &output.join("runtime.json"),
+        &output.join("model.json"),
+    )
+    .unwrap();
+
+    let before = package_summaries(package);
+    extract(&options, &output).unwrap();
+    let warm = new_package_run(package, &before);
+    hot(&warm);
+    assert_eq!(warm.summary["configuration"], run.summary["configuration"]);
+    assert_eq!(fs::read(dump).unwrap(), first_dump);
+    assert_eq!(fs::read(fixture.join("Cargo.toml")).unwrap(), manifest);
+    assert_eq!(fs::read(fixture.join("Cargo.lock")).unwrap(), lock);
+}

@@ -34,7 +34,9 @@ export function relevantInputNames(workspace) {
   const root = pathsForRepository(workspace).packageRoot;
   const tools = workspace === repositoryRoot ? toolRepositoryRoot : workspace;
   const names = ['Cargo.toml', 'Cargo.lock', 'src', ...['package.json', 'package-lock.json', 'src', 'tests'].map(name => path.relative(workspace, path.join(root, name))),
-    ...['tools/rustc-analysis', 'scripts/rustc-analysis.sh', 'rust-toolchain.toml'].map(name => path.relative(workspace, path.join(tools, name)))];
+    ...['tools/rustc-analysis', 'scripts/rustc-analysis.sh', 'rust-toolchain.toml',
+      ...['Cargo.toml', 'Cargo.lock', 'build.rs', 'src'].map(name => `tools/bevy-schedule-export/${name}`),
+    ].map(name => path.relative(workspace, path.join(tools, name)))];
   for (const name of ['build.rs', '.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml']) if (fs.existsSync(path.join(workspace, name))) names.push(name);
   if (fs.existsSync(root)) for (const name of fs.readdirSync(root)) if (name.endsWith('.mjs')) names.push(path.relative(workspace, path.join(root, name)));
   return names.map(slash);

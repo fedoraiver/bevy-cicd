@@ -54,7 +54,7 @@ const toolsForRun = () => {
   return { node: { ...binaryIdentity(process.execPath), version: process.version, platform: process.platform, arch: process.arch }, cargo: binaryIdentity('cargo'), npm };
 };
 const dependencySnapshot = inputs => Object.fromEntries((inputs || []).map(input => [input.path, fs.existsSync(input.path) ? digest(fs.readFileSync(input.path)) : null]).sort(([a], [b]) => a.localeCompare(b)));
-const exportProvenance = manifest => Object.fromEntries(['schemaVersion', 'bevyVersion', 'debugdumpVersion', 'sourceFingerprint', 'exportedAt', 'target', 'features', 'schedules'].map(key => [key, key === 'schedules'
+const exportProvenance = manifest => Object.fromEntries(['schemaVersion', 'bevyVersion', 'debugdumpVersion', 'exporter', 'sourceFingerprint', 'exportedAt', 'target', 'features', 'schedules'].map(key => [key, key === 'schedules'
   ? manifest.schedules.map(entry => Object.fromEntries(['id', 'app', 'label', 'systemCount', 'sha256'].map(field => [field, entry[field]]))) : manifest[key]]));
 
 /** 只读计划不创建 tmp、不运行 Cargo，也不触发 npm 模块加载或安装。 */
