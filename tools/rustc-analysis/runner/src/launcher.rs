@@ -17,6 +17,7 @@ pub(crate) struct Launcher {
     pub root: PathBuf,
     pub manifest: PathBuf,
     pub caller_root: PathBuf,
+    pub caller_id: String,
     pub metadata: Value,
     source_lock: PathBuf,
     pub source_lock_digest: String,
@@ -193,12 +194,6 @@ debugdump = ["bevy/debug"]
         let metadata: Value = serde_json::from_slice(&output.stdout)?;
         let launcher_graph = dependency_graph(&metadata, caller_id)?;
         ensure!(
-            base_graph.iter().all(|(package, edges)| launcher_graph
-                .get(package)
-                .is_some_and(|locked| edges.is_subset(locked))),
-            "Launcher resolution changed the caller's locked dependency graph"
-        );
-        ensure!(
             bevy_version(&metadata, &launcher_graph)? == version,
             "Launcher resolution changed the caller's Bevy version"
         );
@@ -207,6 +202,7 @@ debugdump = ["bevy/debug"]
             root,
             manifest,
             caller_root: options.root.clone(),
+            caller_id: caller_id.to_owned(),
             metadata,
             source_lock,
             source_lock_digest,

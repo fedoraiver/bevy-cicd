@@ -476,6 +476,42 @@ impl Host {
         Ok(())
     }
 
+    fn check_launcher_dependencies(
+        &self,
+        options: &Options,
+        launcher: &Launcher,
+        overlay: &UnitGraph,
+    ) -> Result<()> {
+        let mut cargo = self.command("cargo");
+        cargo.args([
+            "build",
+            "--lib",
+            "--locked",
+            "--offline",
+            "--unit-graph",
+            "-Zunstable-options",
+            "-p",
+            &launcher.caller_id,
+        ]);
+        if !options.features.is_empty() {
+            cargo.args(["--features", &options.features.join(",")]);
+        }
+        if options.all_features {
+            cargo.arg("--all-features");
+        }
+        let original = cargo.output()?;
+        ensure!(
+            original.status.success(),
+            "Cannot resolve the locked native caller library graph: {}",
+            String::from_utf8_lossy(&original.stderr)
+        );
+        fs::write(
+            self.directory.join("caller-unit-graph.json"),
+            &original.stdout,
+        )?;
+        overlay.verify_launcher_caller(&UnitGraph::parse(&original.stdout)?, &launcher.caller_id)
+    }
+
     fn compile(
         &self,
         options: &Options,
@@ -697,6 +733,9 @@ impl Host {
             &graph_output.stdout,
         )?;
         let graph = UnitGraph::parse(&graph_output.stdout)?;
+        if let Some(launcher) = launcher {
+            self.check_launcher_dependencies(options, launcher, &graph)?;
+        }
         let mut environment: BTreeMap<String, String> = env::vars_os()
             .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
             .map(|(name, value)| (unit_binding::environment_key(&name), value))
