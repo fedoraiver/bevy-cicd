@@ -6,7 +6,7 @@
 
 ## Rust 检查
 
-将下方配置存为调用仓库的 `.github/workflows/ci.yml`，把 `main` 改为项目默认分支。应用的 `Cargo.lock` 应提交到 Git。
+将下方配置存为调用仓库的 `.github/workflows/ci.yml`，将 `branches` 中的 `main` 改为项目默认分支。应用的 `Cargo.lock` 应提交到 Git。
 
 ```yaml
 name: Rust CI
@@ -62,7 +62,7 @@ bevy_schedule_export::dump_schedules(
 )?;
 ```
 
-在调用仓库的 **Settings → Pages** 将源设为 **GitHub Actions**。下面的工作流在 PR 中生成并校验站点，在默认分支合入后上线。将 `main` 改为项目实际的默认分支。
+在调用仓库的 **Settings → Pages** 将源设为 **GitHub Actions**。下面的工作流在 PR 中生成并校验站点，在默认分支合入后上线。将 `branches` 中的 `main` 改为项目实际的默认分支。
 
 ```yaml
 name: ECS architecture
@@ -97,7 +97,7 @@ jobs:
 
 ## 发布自定义架构站点
 
-在调用仓库的 **Settings → Pages** 将发布源设为 **GitHub Actions**。调用方负责运行自己的生成和校验脚本，产物根目录应包含 `index.html`。下面的示例假设 `scripts/build-architecture.sh` 生成 `tmp/site` 目录。把 `main` 改为项目默认分支，按实际项目修改生成步骤。
+在调用仓库的 **Settings → Pages** 将发布源设为 **GitHub Actions**。调用方负责运行自己的生成和校验脚本，产物根目录应包含 `index.html`。下面的示例假设 `scripts/build-architecture.sh` 生成 `tmp/site` 目录。将 `branches` 中的 `main` 改为项目默认分支，按实际项目修改生成步骤。
 
 ```yaml
 name: Publish architecture
