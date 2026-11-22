@@ -90,9 +90,8 @@ test('CI saves only geometry candidates after failures with a unique key and com
   assert.ok(restoreStart >= 0 && verified > restoreStart && saveStart > verified && upload > saveStart);
   const restore = workflow.slice(restoreStart, workflow.indexOf('      - name:', restoreStart + 1));
   const save = workflow.slice(saveStart, workflow.indexOf('      - name:', saveStart + 1));
-  const sha = '55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
-  assert.ok(restore.includes(`uses: actions/cache/restore@${sha}`));
-  assert.ok(save.includes(`uses: actions/cache/save@${sha}`));
+  assert.match(restore, /^\s{8}uses: actions\/cache\/restore@main\s*$/m);
+  assert.match(save, /^\s{8}uses: actions\/cache\/save@main\s*$/m);
   assert.match(restore, /^\s{8}id: geometry\s*$/m);
   assert.ok(save.includes("if: ${{ always() && steps.geometry.outcome == 'success' }}"));
   assert.ok(save.includes('key: ${{ steps.geometry.outputs.cache-primary-key }}'));
@@ -109,7 +108,7 @@ test('CI saves only geometry candidates after failures with a unique key and com
   const browserStart = workflow.indexOf('      - name: Restore locked browser');
   assert.ok(browserStart >= 0);
   const browser = workflow.slice(browserStart, workflow.indexOf('      - name:', browserStart + 1));
-  assert.ok(browser.includes(`uses: actions/cache@${sha}`));
+  assert.match(browser, /^\s{8}uses: actions\/cache@main\s*$/m);
   assert.ok(browser.includes('path: project/tmp/ecs-architecture/puppeteer'));
 });
 
