@@ -195,6 +195,8 @@ fn fixture() -> &'static Report {
 name = "entity-name-fixture"
 version = "0.0.0"
 edition = "2024"
+[workspace]
+exclude = ["factories", "macros"]
 [dependencies]
 bevy_ecs = "0.20"
 bevy_scene = "0.20"
@@ -830,6 +832,7 @@ fn cli_rejects_unresolved_names_with_source_trace_and_help() {
 name = "entity-name-cli-outcomes"
 version = "0.0.0"
 edition = "2024"
+[workspace]
 [dependencies]
 bevy_ecs = "0.20"
 bevy_scene = "0.20"
@@ -940,7 +943,7 @@ fn build_script_artifacts_do_not_require_reports_outside_selected_library_source
     write(
         &root,
         "Cargo.toml",
-        "[package]\nname = \"entity-name-build-script-targets\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        "[package]\nname = \"entity-name-build-script-targets\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n",
     );
     write(
         &root,
@@ -966,7 +969,7 @@ fn rejects_missing_stale_and_incompatible_driver_reports() {
     write(
         &root,
         "Cargo.toml",
-        "[package]\nname = \"entity-name-driver-errors\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        "[package]\nname = \"entity-name-driver-errors\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n",
     );
     write(
         &root,

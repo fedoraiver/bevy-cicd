@@ -3,7 +3,7 @@
 use std::{
     error::Error,
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,6 +11,7 @@ use analysis_contract::runtime::{
     RuntimeAccess, RuntimeCondition, RuntimeEdge, RuntimeSchedule, RuntimeSet, RuntimeSnapshot,
     RuntimeSystem,
 };
+use analysis_contract::source_fingerprint::fingerprint;
 use bevy_app::{App, PluginsState, SubApps};
 use bevy_ecs::{
     query::ComponentAccessKind,
@@ -38,6 +39,8 @@ struct Manifest {
     target: &'static str,
     features: [&'static str; 1],
     source_fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_inputs: Option<Vec<String>>,
     schedules: Vec<ScheduleEntry>,
 }
 
@@ -57,7 +60,7 @@ struct ScheduleEntry {
 ///
 /// source_root 指向接受分析的 Cargo 项目，供清单读取锁定版本与源码指纹。
 pub fn dump_schedules(app: &mut App, output: &Path, source_root: &Path) -> DumpResult<usize> {
-    dump_schedules_with_lock(app, output, source_root, None)
+    dump_schedules_with_lock(app, output, source_root, None, None)
 }
 
 /// 从共享启动器导出调用方装配的 App。
@@ -71,7 +74,24 @@ pub mod launcher {
         source_root: &Path,
         launcher_lock: &Path,
     ) -> DumpResult<usize> {
-        dump_schedules_with_lock(app, output, source_root, Some(launcher_lock))
+        dump_schedules_with_lock(app, output, source_root, Some(launcher_lock), None)
+    }
+
+    /// 使用编译阶段确认的工作区输入，支持源码和 Cargo 包位于不同目录。
+    pub fn dump_workspace_schedules(
+        app: &mut App,
+        output: &Path,
+        source_root: &Path,
+        launcher_lock: &Path,
+        source_inputs: Vec<String>,
+    ) -> DumpResult<usize> {
+        dump_schedules_with_lock(
+            app,
+            output,
+            source_root,
+            Some(launcher_lock),
+            Some(source_inputs),
+        )
     }
 }
 
@@ -80,6 +100,7 @@ fn dump_schedules_with_lock(
     output: &Path,
     source_root: &Path,
     launcher_lock: Option<&Path>,
+    source_inputs: Option<Vec<String>>,
 ) -> DumpResult<usize> {
     while app.plugins_state() == PluginsState::Adding {
         bevy_tasks::tick_global_task_pools_on_main_thread();
@@ -110,7 +131,7 @@ fn dump_schedules_with_lock(
         }
     }
     let debugdump_version = lockfile.version("bevy_mod_debugdump")?;
-    let source_fingerprint = source_fingerprint(source_root)?;
+    let source_fingerprint = fingerprint(source_root, source_inputs.as_deref())?;
     let mut snapshots = Vec::new();
     let mut entries = dump_world("main", app.world_mut(), output, &mut snapshots)?;
     let SubApps { main, sub_apps } = app.sub_apps_mut();
@@ -136,6 +157,7 @@ fn dump_schedules_with_lock(
         target: env!("BEVY_SCHEDULE_EXPORT_TARGET"),
         features: ["debugdump"],
         source_fingerprint,
+        source_inputs,
         schedules: entries,
     };
     let runtime = RuntimeSnapshot {
@@ -366,53 +388,6 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn source_fingerprint(root: &Path) -> DumpResult<String> {
-    let mut paths = vec![PathBuf::from("Cargo.toml"), PathBuf::from("Cargo.lock")];
-    if root.join("build.rs").exists() {
-        paths.push(PathBuf::from("build.rs"));
-    }
-    collect_rust_files(root, Path::new("src"), &mut paths)?;
-    let mut paths = paths
-        .into_iter()
-        .map(|path| {
-            path.to_str()
-                .map(|path| path.replace('\\', "/"))
-                .ok_or_else(|| "Source path is not valid UTF-8.".into())
-        })
-        .collect::<DumpResult<Vec<String>>>()?;
-    paths.sort();
-    let mut hash = Sha256::new();
-    for path in paths {
-        let content = fs::read_to_string(root.join(&path))?.replace("\r\n", "\n");
-        hash.update(path.as_bytes());
-        hash.update([0]);
-        hash.update(content.as_bytes());
-        hash.update([0]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
-}
-
-fn collect_rust_files(root: &Path, relative: &Path, paths: &mut Vec<PathBuf>) -> DumpResult<()> {
-    for entry in fs::read_dir(root.join(relative))? {
-        let entry = entry?;
-        let path = relative.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            return Err(format!(
-                "Source fingerprint does not support symlinks: {}",
-                path.display()
-            )
-            .into());
-        }
-        if file_type.is_dir() {
-            collect_rust_files(root, &path, paths)?;
-        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
-            paths.push(path);
-        }
-    }
-    Ok(())
-}
-
 #[derive(Deserialize)]
 struct CargoLock {
     package: Vec<LockedPackage>,
@@ -438,6 +413,7 @@ impl CargoLock {
 mod tests {
     use super::*;
     use bevy_app::{AppLabel, Plugin, Startup, SubApp, Update};
+    use std::path::PathBuf;
 
     #[derive(AppLabel, Clone, Copy, Debug, Hash, PartialEq, Eq)]
     struct RenderApp;
@@ -541,7 +517,7 @@ mod tests {
             serde_json::from_slice(&fs::read(output.join("manifest.json")).unwrap()).unwrap();
         let runtime: RuntimeSnapshot =
             serde_json::from_slice(&fs::read(output.join("runtime.json")).unwrap()).unwrap();
-        let fingerprint = source_fingerprint(&root).unwrap();
+        let fingerprint = fingerprint(&root, None).unwrap();
         assert_eq!(manifest["exporter"], "shared-launcher");
         assert_eq!(manifest["bevyVersion"], "0.20.0");
         assert_eq!(manifest["debugdumpVersion"], "0.17.0");

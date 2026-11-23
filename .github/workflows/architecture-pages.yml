@@ -7,6 +7,10 @@ on:
         description: Pages artifact uploaded in this run. The proof artifact adds the suffix -proof.
         required: true
         type: string
+      verify-ecs-site:
+        description: Verify an architecture-build site manifest and published ECS resources.
+        default: false
+        type: boolean
     outputs:
       page_url:
         description: The deployed URL after HTTP verification.
@@ -32,9 +36,9 @@ jobs:
       cancel-in-progress: false
     environment:
       name: github-pages
-      url: ${{ steps.verify.outputs.page_url }}
+      url: ${{ steps.verify.outcome == 'success' && steps.verify.outputs.page_url || '' }}
     outputs:
-      page_url: ${{ steps.verify.outputs.page_url }}
+      page_url: ${{ steps.verify.outcome == 'success' && steps.verify.outputs.page_url || '' }}
     steps:
       - name: Check out workflow helpers
         uses: actions/checkout@main
@@ -54,6 +58,16 @@ jobs:
 
       - name: Validate the publication proof
         run: python3 bevy-cicd/scripts/verify_pages.py validate publication-proof/bevy-cicd-build.json
+
+      - name: Require the ECS site proof
+        if: ${{ inputs.verify-ecs-site }}
+        run: test -f publication-proof/site-manifest.json
+
+      - name: Prepare the ECS verification runtime
+        if: ${{ inputs.verify-ecs-site }}
+        uses: actions/setup-node@main
+        with:
+          node-version: '24'
 
       - name: Configure Pages
         uses: actions/configure-pages@main
@@ -165,6 +179,7 @@ jobs:
               steps.deploy_3.outcome == 'success' || steps.deploy_4.outcome == 'success' ||
               steps.deploy_5.outcome == 'success' || steps.deploy_6.outcome == 'success' }}
         env:
+          VERIFY_ECS_SITE: ${{ inputs.verify-ecs-site }}
           PAGE_URL: >-
             ${{ steps.deploy_1.outcome == 'success' && steps.deploy_1.outputs.page_url ||
                 steps.deploy_2.outcome == 'success' && steps.deploy_2.outputs.page_url ||
@@ -172,4 +187,19 @@ jobs:
                 steps.deploy_4.outcome == 'success' && steps.deploy_4.outputs.page_url ||
                 steps.deploy_5.outcome == 'success' && steps.deploy_5.outputs.page_url ||
                 steps.deploy_6.outcome == 'success' && steps.deploy_6.outputs.page_url }}
-        run: python3 bevy-cicd/scripts/verify_pages.py verify publication-proof/bevy-cicd-build.json "$PAGE_URL"
+        run: |
+          python3 bevy-cicd/scripts/verify_pages.py verify publication-proof/bevy-cicd-build.json "$PAGE_URL"
+          if [[ "$VERIFY_ECS_SITE" == true ]]; then
+            node bevy-cicd/tools/ecs-diagrams/maintain.mjs verify-pages \
+              --workspace "$GITHUB_WORKSPACE" --url "$PAGE_URL" \
+              --expected publication-proof/site-manifest.json --commit "$GITHUB_SHA"
+          fi
+
+      - name: Preserve deployed ECS verification evidence
+        if: ${{ always() && inputs.verify-ecs-site && (steps.verify.outcome == 'success' || steps.verify.outcome == 'failure') }}
+        uses: actions/upload-artifact@main
+        with:
+          name: ecs-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 3
+          if-no-files-found: warn
+          path: tmp/ecs-architecture/deployment/

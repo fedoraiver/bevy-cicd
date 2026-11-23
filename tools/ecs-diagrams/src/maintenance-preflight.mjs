@@ -13,7 +13,7 @@ export async function preflightArchitecture({ workspace, debugdumpDirectory } = 
   const dependencyInputs = model.sourceFiles.filter(source => source.dependency).map(source => ({
     path: path.resolve(source.dependency.root, source.path), sha256: sha256(fs.readFileSync(path.resolve(source.dependency.root, source.path))),
   })).sort((a, b) => a.path.localeCompare(b.path));
-  if (sourceFingerprint(workspace) !== dump.manifest.sourceFingerprint) throw new Error('Source changed during architecture preflight; extract again');
+  if (sourceFingerprint(workspace, dump.manifest.sourceInputs) !== dump.manifest.sourceFingerprint) throw new Error('Source changed during architecture preflight; extract again');
   const dependencies = mermaidDependencyIdentity(workspace);
   const identities = new Map(prepared.views.filter(view => view.mermaid).map(view => [view.id, mermaidRenderIdentity(view, registry, dependencies)]));
   return {

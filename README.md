@@ -38,11 +38,14 @@ jobs:
       package-path: .
 ```
 
-规则检查生产代码创建的 Bevy 实体是否具有初始名称，以及 Rust 单字段元组结构体等声明是否使用了具名字段。分析器固定使用 `nightly-2026-10-31`，调用方的 Cargo 包及其锁定依赖须能用该工具链编译。仓库回归覆盖 Bevy ECS 和 Scene 0.20.1。
+规则使用 `nightly-2026-10-31`，调用方的包及其锁定依赖须能用该工具链编译。回归覆盖 Bevy ECS 和 Scene 0.20.1。
+
+- `entity-names` 检查生产代码创建的实体和子实体。初始组合必须提供非空的 Bevy `Name`，包括由 BSN 或 required component 提供的名称。无法确定名称的组合会报告诊断。
+- `named-fields` 检查当前编译配置下项目 crate 中的单字段元组结构体，包括宏展开生成的类型。标记结构体、多字段元组结构体、枚举变体及依赖 crate 中的类型按原定义处理。
 
 ## 生成并发布 ECS 架构图
 
-对于使用 Bevy 0.20 的根 Cargo 包，在库根公开无参数的 `build_app`，复用游戏启动时的插件装配。下面的示例假定 `configure` 负责注册项目的真实插件。
+对于使用 Bevy 0.20 的 Cargo 包，在库根公开无参数的 `build_app`，复用游戏启动时的插件装配。下面的示例假定 `configure` 负责注册项目的真实插件。
 
 ```rust
 pub fn build_app() -> bevy::prelude::App {
@@ -57,6 +60,13 @@ pub fn build_app() -> bevy::prelude::App {
 ```toml
 [package.metadata.bevy-architecture]
 app-factory = "build_app"
+```
+
+仓库根为虚拟 workspace 时，在根清单指定用于导出的成员包名。成员包清单仍声明自己的 App 构造函数。资源、锁文件和共享源码从调用方工作区解析。
+
+```toml
+[workspace.metadata.bevy-architecture]
+package = "my-game"
 ```
 
 共享工作流在自己的构建目录内生成启动器，通过 Cargo 路径依赖调用该函数，并在插件就绪后导出主应用和子应用的运行时记录与调度 DOT。旧项目可继续使用已有的 `debugdump` feature 和 `--dump-schedules <directory>` 入口。迁移时加入上面的构造函数和声明，再移除旧入口及其导出依赖。
@@ -90,9 +100,10 @@ jobs:
       id-token: write
     with:
       artifact-name: ${{ needs.build.outputs.artifact-name }}
+      verify-ecs-site: true
 ```
 
-构建按固定 Rust 和 Node 依赖提取编译器事实、执行调度导出，并生成和检查 ECS 可视化站点。使用 App 构造函数的项目从同一轮编译取得项目库的事实和启动器二进制。运行证据以 `ecs-evidence-<run>-<attempt>` 产物保留。参见[共享调度导出启动器决策](docs/adr/0001-shared-schedule-launcher.md)。
+构建按固定 Rust 和 Node 依赖提取编译器事实、执行调度导出，并生成和检查 ECS 可视化站点。使用 App 构造函数的项目从同一轮编译取得项目库的事实和启动器二进制。运行证据以 `ecs-evidence-<run>-<attempt>` 产物保留。浏览和解释图中的证据见[ECS 架构图参考](tools/ecs-diagrams/README.md)，本地复现与排错见[维护指南](tools/ecs-diagrams/maintenance.md)。[共享调度导出启动器决策](docs/adr/0001-shared-schedule-launcher.md)
 
 ## 发布自定义架构站点
 

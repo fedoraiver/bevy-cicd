@@ -497,6 +497,7 @@ impl Model {
         let label = match role {
             "definition" => "定义位置",
             "registration" => "注册位置",
+            "plugin-disable" => "插件禁用位置",
             "parameter" => "参数位置",
             "create" => "创建位置",
             "assembly" => "装配位置",
@@ -728,6 +729,45 @@ impl Model {
         }
     }
 
+    fn plugin_group_configuration(
+        &mut self,
+        disabled: &[DisabledGroupMember],
+        callsite: &[Value],
+        evidence: &mut Value,
+        sources: &mut Vec<Value>,
+    ) {
+        let mut members = Vec::new();
+        let mut names = BTreeSet::new();
+        for member in disabled {
+            let Some(id) = self.type_object(&member.type_id) else {
+                continue;
+            };
+            let plugin = &self.objects[&id];
+            let name = plugin["typeIdentity"]["defPath"]
+                .as_str()
+                .or_else(|| plugin["name"].as_str())
+                .expect("Plugin has a name");
+            names.insert(name.to_owned());
+            let disabled_at = self.source(&member.source, "plugin-disable");
+            sources.extend(disabled_at.clone());
+            members.push(json!({"pluginId":id,"sourceEntries":disabled_at}));
+        }
+        if members.is_empty() {
+            return;
+        }
+        evidence["pluginGroupConfigurations"] =
+            json!([{"callsite":callsite,"disabledMembers":members}]);
+        let location = callsite.first().map_or_else(String::new, |source| {
+            format!(
+                "（{}:{}）",
+                source["path"].as_str().expect("Source has a path"),
+                source["line"].as_u64().expect("Source has a line")
+            )
+        });
+        let names = names.into_iter().collect::<Vec<_>>().join("、");
+        evidence["notes"] = json!([format!("该组装配{location}禁用 {names}")]);
+    }
+
     fn callable_for_runtime(&self, runtime_type: &str) -> Vec<String> {
         let mut found = self
             .runtime_callables
@@ -931,10 +971,34 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
         "Compiler/runtime build provenance mismatch"
     );
     let root = PathBuf::from(&bundle.workspace).canonicalize()?;
+    let runtime_directory = runtime.parent().unwrap_or(Path::new(".")).join("debugdump");
+    let manifest_bytes = fs::read(runtime_directory.join("manifest.json"))
+        .context("Runtime export has no successful manifest")?;
+    let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
+    let source_inputs: Option<Vec<String>> =
+        serde_json::from_value(manifest["sourceInputs"].clone())
+            .context("Invalid workspace source inputs")?;
     ensure!(
-        source_fingerprint(&root)? == runtime_data.source_fingerprint,
+        analysis_contract::source_fingerprint::fingerprint(&root, source_inputs.as_deref())?
+            == runtime_data.source_fingerprint,
         "Runtime source fingerprint is stale"
     );
+    ensure!(
+        manifest["sourceFingerprint"] == runtime_data.source_fingerprint,
+        "Runtime manifest source mismatch"
+    );
+    let manifest_schedules = manifest["schedules"]
+        .as_array()
+        .context("Runtime manifest has no schedules")?;
+    ensure!(
+        manifest_schedules.len() == runtime_data.schedules.len(),
+        "Runtime manifest schedule coverage mismatch"
+    );
+    let (assembly_entry, app_name) = if manifest["exporter"] == "shared-launcher" {
+        ("::build_app", "build_app / App")
+    } else {
+        ("::main", "main / App")
+    };
     for origin in &bundle.source_origins {
         ensure!(
             origin["compilerCommit"] == bundle.compiler,
@@ -1138,28 +1202,13 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
         "application".into(),
         json!({"id":"application","label":"应用","plugin":"App","overviewNode":"app-main"}),
     );
-    model.objects.insert("app-main".into(),json!({"id":"app-main","name":"main / App","kind":"App","feature":"application","sourceEntries":[],"sourceGaps":[]}));
+    model.objects.insert("app-main".into(),json!({"id":"app-main","name":app_name,"kind":"App","feature":"application","sourceEntries":[],"sourceGaps":[]}));
     let mut bindings = vec![];
     let mut callable_objects: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut call_contexts: BTreeMap<(String, String, bool), Vec<SourceEvidence>> = BTreeMap::new();
     let mut group_catalog = BTreeMap::<String, Value>::new();
     let mut analysis_gaps = vec![];
     let mut schedule_groups = serde_json::Map::new();
-    let runtime_directory = runtime.parent().unwrap_or(Path::new(".")).join("debugdump");
-    let manifest_bytes = fs::read(runtime_directory.join("manifest.json"))
-        .context("Runtime export has no successful manifest")?;
-    let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
-    ensure!(
-        manifest["sourceFingerprint"] == runtime_data.source_fingerprint,
-        "Runtime manifest source mismatch"
-    );
-    let manifest_schedules = manifest["schedules"]
-        .as_array()
-        .context("Runtime manifest has no schedules")?;
-    ensure!(
-        manifest_schedules.len() == runtime_data.schedules.len(),
-        "Runtime manifest schedule coverage mismatch"
-    );
     let mut assembly_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for callable in model.callables.values().cloned().collect::<Vec<_>>() {
         let Some(declaration) = model.declarations.get(&callable.declaration).cloned() else {
@@ -1169,7 +1218,7 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
             && declaration
                 .full_name
                 .strip_prefix(declaration.crate_name.as_str())
-                == Some("::main")
+                == Some(assembly_entry)
         {
             assembly_owners
                 .entry(callable.id.clone())
@@ -1721,20 +1770,58 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
             continue;
         };
         let sources = model.source(&registration.source, "registration");
-        if registration.kind == "add_plugins"
+        let plugin_call = match registration.kind.as_str() {
+            "add_plugins" => Some(("registration", "源码安装调用", "static-callsite")),
+            "group_member" => Some((
+                "plugin_group_member",
+                "插件组成员声明",
+                "plugin-group-declaration",
+            )),
+            "group_include" => Some((
+                "plugin_group_include",
+                "合并插件组声明",
+                "plugin-group-declaration",
+            )),
+            _ => None,
+        };
+        if let Some((kind, label, scope)) = plugin_call
             && let Some(ty) = &registration.type_id
         {
             for role in ["Plugin", "PluginGroup"] {
                 for ty in model.nested_types_with_role(ty, role) {
                     if let Some(target) = model.type_object(&ty) {
+                        if model.objects[&target]["typeIdentity"]["defPath"]
+                            == "bevy_app::plugin_group::PluginGroupBuilder"
+                        {
+                            if registration.target.is_none() {
+                                analysis_gaps.push(json!({"unit":"model","owner":registration.owner,"kind":"plugin-group-origin","reason":"无法从此调用点确定插件组构建器对应的组和成员状态。","sourceEntries":sources}));
+                            }
+                            continue;
+                        }
+                        let mut evidence = json!({"evidence":"typed-call","scope":scope});
+                        let mut relation_sources = sources.clone();
+                        if role == "PluginGroup" && !registration.disabled_group_members.is_empty()
+                        {
+                            model.plugin_group_configuration(
+                                &registration.disabled_group_members,
+                                &sources,
+                                &mut evidence,
+                                &mut relation_sources,
+                            );
+                        }
                         for owner in owners {
+                            if scope == "plugin-group-declaration"
+                                && model.objects[owner]["kind"] != "PluginGroup"
+                            {
+                                continue;
+                            }
                             model.link(
                                 owner,
                                 &target,
-                                "registration",
-                                "安装调用",
-                                sources.clone(),
-                                json!({"evidence":"typed-call","scope":"static-callsite"}),
+                                kind,
+                                label,
+                                relation_sources.clone(),
+                                evidence.clone(),
                             );
                         }
                     }
@@ -2111,13 +2198,14 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
     fs::create_dir_all(output_parent)?;
     analysis_gaps.extend(model.rejected_types.into_values());
     let result = json!({"schemaVersion":2,"compiler":bundle.compiler,"configuration":bundle.configuration,
-        "runtimeDirectory":runtime_directory,"projectCrates":project_crates,"inputs":{"sourceFingerprint":runtime_data.source_fingerprint,"factsSha256":facts_hash,"runtimeSha256":digest(&runtime_bytes)},
+        "runtimeDirectory":runtime_directory,"projectCrates":project_crates,"inputs":{"sourceFingerprint":runtime_data.source_fingerprint,"sourceInputs":source_inputs,"factsSha256":facts_hash,"runtimeSha256":digest(&runtime_bytes)},
         "objects":model.objects.into_values().collect::<Vec<_>>(),"relations":model.relations.into_values().collect::<Vec<_>>(),"features":model.features.into_values().collect::<Vec<_>>(),
         "sourceFiles":model.source_cache.snapshots.into_values().collect::<Vec<_>>(),"callGraph":call_graph,"scheduleInteractions":{"schemaVersion":1,"views":bindings},"schedulePluginCatalog":group_catalog.into_values().collect::<Vec<_>>(),"schedulePluginGroups":schedule_groups,
         "bindingErrors":model.fatal,"analysisGaps":aggregate_gaps(analysis_gaps)});
     fs::write(output, serde_json::to_vec_pretty(&result)?)?;
     ensure!(
-        source_fingerprint(&model.root)? == runtime_data.source_fingerprint,
+        analysis_contract::source_fingerprint::fingerprint(&model.root, source_inputs.as_deref())?
+            == runtime_data.source_fingerprint,
         "Source changed during model generation"
     );
     ensure!(
@@ -2132,37 +2220,9 @@ pub fn build(facts: &Path, runtime: &Path, output: &Path) -> Result<()> {
 
 /// 与专用导出和 Node 加载器共用的生产源码指纹。
 pub fn source_fingerprint(root: &Path) -> Result<String> {
-    fn collect(root: &Path, relative: &Path, files: &mut Vec<String>) -> Result<()> {
-        for entry in fs::read_dir(root.join(relative))? {
-            let entry = entry?;
-            let path = relative.join(entry.file_name());
-            let kind = entry.file_type()?;
-            ensure!(
-                !kind.is_symlink(),
-                "Source fingerprint does not follow symlinks"
-            );
-            if kind.is_dir() {
-                collect(root, &path, files)?;
-            } else if kind.is_file() && path.extension().is_some_and(|value| value == "rs") {
-                files.push(path.to_string_lossy().replace('\\', "/"));
-            }
-        }
-        Ok(())
-    }
-    let mut files = vec!["Cargo.toml".to_owned(), "Cargo.lock".to_owned()];
-    if root.join("build.rs").exists() {
-        files.push("build.rs".into());
-    }
-    collect(root, Path::new("src"), &mut files)?;
-    files.sort();
-    let mut hash = Sha256::new();
-    for file in files {
-        hash.update(file.as_bytes());
-        hash.update([0]);
-        hash.update(fs::read_to_string(root.join(file))?.replace("\r\n", "\n"));
-        hash.update([0]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(analysis_contract::source_fingerprint::fingerprint(
+        root, None,
+    )?)
 }
 
 #[cfg(test)]

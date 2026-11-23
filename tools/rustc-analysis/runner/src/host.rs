@@ -410,7 +410,13 @@ impl Host {
 
     fn metadata(&self, options: &Options, full: bool) -> Result<serde_json::Value> {
         let mut command = self.command("cargo");
-        command.args(["metadata", "--locked", "--offline", "--format-version", "1"]);
+        command.current_dir(&options.root).args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--format-version",
+            "1",
+        ]);
         if !full {
             command.arg("--no-deps");
         }
@@ -468,6 +474,42 @@ impl Host {
             recovered.insert(id.clone());
         }
         Ok(())
+    }
+
+    fn check_launcher_dependencies(
+        &self,
+        options: &Options,
+        launcher: &Launcher,
+        overlay: &UnitGraph,
+    ) -> Result<()> {
+        let mut cargo = self.command("cargo");
+        cargo.args([
+            "build",
+            "--lib",
+            "--locked",
+            "--offline",
+            "--unit-graph",
+            "-Zunstable-options",
+            "-p",
+            &launcher.caller_id,
+        ]);
+        if !options.features.is_empty() {
+            cargo.args(["--features", &options.features.join(",")]);
+        }
+        if options.all_features {
+            cargo.arg("--all-features");
+        }
+        let original = cargo.output()?;
+        ensure!(
+            original.status.success(),
+            "Cannot resolve the locked native caller library graph: {}",
+            String::from_utf8_lossy(&original.stderr)
+        );
+        fs::write(
+            self.directory.join("caller-unit-graph.json"),
+            &original.stdout,
+        )?;
+        overlay.verify_launcher_caller(&UnitGraph::parse(&original.stdout)?, &launcher.caller_id)
     }
 
     fn compile(
@@ -599,10 +641,12 @@ impl Host {
             run: self.run.clone(),
             configuration: configuration.clone(),
             compiler: env!("ANALYSIS_COMPILER").into(),
-            workspace: normalized(&self.root)?,
+            workspace: normalized(&self.workspace)?,
             rule,
             sources,
-            manifest_dirs: BTreeSet::from([normalized(&self.root)?]),
+            manifest_dirs: BTreeSet::from([normalized(
+                launcher.map_or(self.root.as_path(), |launcher| &launcher.caller_root),
+            )?]),
             package_origins: package_origins(metadata, &self.workspace)?,
         };
         let request_path = self
@@ -689,6 +733,9 @@ impl Host {
             &graph_output.stdout,
         )?;
         let graph = UnitGraph::parse(&graph_output.stdout)?;
+        if let Some(launcher) = launcher {
+            self.check_launcher_dependencies(options, launcher, &graph)?;
+        }
         let mut environment: BTreeMap<String, String> = env::vars_os()
             .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
             .map(|(name, value)| (unit_binding::environment_key(&name), value))
@@ -1614,7 +1661,7 @@ pub fn extract(options: &Options, output: &Path) -> Result<()> {
     let metadata = host.metadata(&Options::new(host.root.clone()), false)?;
     let caller = launcher::caller_package(&metadata, &host.root)?;
     let mut selected = options.clone();
-    selected.root = host.root.clone();
+    selected.root = launcher::package_root(caller)?;
     let launcher = if launcher::uses_launcher(caller)? {
         let baseline = host.metadata(&selected, true)?;
         Some(Launcher::prepare(
@@ -1625,6 +1672,10 @@ pub fn extract(options: &Options, output: &Path) -> Result<()> {
             || host.command("cargo"),
         )?)
     } else {
+        ensure!(
+            selected.root == host.root,
+            "A virtual workspace requires a member with an App factory"
+        );
         ensure!(
             caller["features"].get("debugdump").is_some(),
             "Declare [package.metadata.bevy-architecture] app-factory = \"build_app\" and expose the App factory in the project library"
@@ -1642,6 +1693,62 @@ pub fn extract(options: &Options, output: &Path) -> Result<()> {
     publish_extraction(&host, source_origins, result, output, launcher.as_ref())
 }
 
+fn workspace_source_inputs(root: &Path, compilation: &Compilation) -> Result<Vec<String>> {
+    let root = normalized(root)?;
+    let root = Path::new(&root);
+    let mut inputs = BTreeSet::from(["Cargo.toml".to_owned(), "Cargo.lock".to_owned()]);
+    let mut add = |source: &str| -> Result<()> {
+        let source = normalized(Path::new(source))?;
+        if let Ok(relative) = Path::new(&source).strip_prefix(root)
+            && Path::new(&source).is_file()
+        {
+            inputs.insert(relative.to_string_lossy().replace('\\', "/"));
+        }
+        Ok(())
+    };
+    for report in &compilation.reports {
+        for source in &report.inputs.files {
+            add(&source.path)?;
+        }
+        for source in report.facts.iter().flat_map(|facts| &facts.source_files) {
+            add(&source.path)?;
+        }
+    }
+    for package in compilation
+        .packages
+        .as_array()
+        .context("Missing compiler packages")?
+    {
+        let manifest = package["manifest_path"]
+            .as_str()
+            .context("Missing package manifest")?;
+        if Path::new(&normalized(Path::new(manifest))?).starts_with(root) {
+            add(manifest)?;
+            for target in package["targets"]
+                .as_array()
+                .context("Missing package targets")?
+            {
+                if target["kind"]
+                    .as_array()
+                    .is_some_and(|kinds| kinds.iter().any(|kind| kind == "custom-build"))
+                {
+                    add(target["src_path"]
+                        .as_str()
+                        .context("Missing build script path")?)?;
+                }
+            }
+        }
+    }
+    // 工作区根可提供成员构建脚本使用的共享构建配置。
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() && entry.path().extension().is_some_and(|ext| ext == "rs") {
+            add(&normalized(&entry.path())?)?;
+        }
+    }
+    Ok(inputs.into_iter().collect())
+}
+
 fn publish_extraction(
     host: &Host,
     source_origins: Vec<serde_json::Value>,
@@ -1657,17 +1764,27 @@ fn publish_extraction(
     let debugdump = staging.join("debugdump");
     let executable = result
         .executable
+        .as_deref()
         .context("Architecture extraction requires a dedicated executable")?;
-    let mut command = Command::new(&executable);
+    let source_root = launcher.map_or(host.root.as_path(), |_| &host.workspace);
+    let project_root = launcher.map_or(host.root.as_path(), |launcher| &launcher.caller_root);
+    let mut command = Command::new(executable);
     command
-        .current_dir(&host.root)
-        .env("BEVY_ASSET_ROOT", &host.root)
+        .current_dir(source_root)
+        .env("BEVY_ASSET_ROOT", source_root)
         .env("PATH", &result.environment_path);
     let launcher_root = if let Some(launcher) = launcher {
         command
             .arg(&debugdump)
-            .arg(&host.root)
+            .arg(source_root)
             .arg(launcher.root.join("Cargo.lock"));
+        if project_root != source_root {
+            // 使用编译器实际读取的工作区输入，包括成员目录之外的 #[path] 模块。
+            let path = host.directory.join("workspace-source-inputs.json");
+            let inputs = workspace_source_inputs(source_root, &result)?;
+            fs::write(&path, serde_json::to_vec(&inputs)?)?;
+            command.arg(path);
+        }
         let launcher_id = &launcher.metadata["resolve"]["root"];
         result
             .packages
@@ -1690,7 +1807,8 @@ fn publish_extraction(
         staging.join("analysis-summary.json"),
         serde_json::to_vec_pretty(&result.summary)?,
     )?;
-    let workspace = normalized(&host.root)?;
+    let workspace = normalized(source_root)?;
+    let project = normalized(project_root)?;
     let mut project_units = BTreeSet::new();
     let mut units = Vec::with_capacity(result.reports.len());
     for report in result.reports {
@@ -1700,7 +1818,7 @@ fn publish_extraction(
         let unit = report
             .facts
             .context("Selected architecture unit has no facts")?;
-        if report.manifest_dir == workspace {
+        if report.manifest_dir == project {
             project_units.insert(unit.crate_identity.clone());
         }
         units.push(unit);
@@ -1718,7 +1836,7 @@ fn publish_extraction(
         packages: result.packages,
         source_origins,
         units,
-        executable_sha256: file_digest(&executable)?,
+        executable_sha256: file_digest(executable)?,
         runtime_sha256: file_digest(&staging.join("runtime.json"))?,
     };
     let staged = staging.join("facts.json");

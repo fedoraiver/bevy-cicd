@@ -1,7 +1,7 @@
 //! 编译器会话之外使用的声明、类型、调用与证据；不保存 rustc 的借用或数字索引。
 use serde::{Deserialize, Serialize};
 
-pub const FACT_SCHEMA_VERSION: u32 = 3;
+pub const FACT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -208,6 +208,16 @@ pub struct RegistrationFact {
     pub kind: String,
     pub target: Option<String>,
     pub type_id: Option<String>,
+    pub source: Option<SourceEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_group_members: Vec<DisabledGroupMember>,
+}
+
+/// 在当前插件组构建器的提交点明确禁用的成员。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisabledGroupMember {
+    pub type_id: String,
     pub source: Option<SourceEvidence>,
 }
 

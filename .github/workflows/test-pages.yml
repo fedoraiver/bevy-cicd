@@ -4,12 +4,18 @@ on:
   pull_request:
     paths:
       - '.github/workflows/*pages.yml'
+      - '.github/workflows/architecture-build.yml'
       - 'scripts/*verify_pages.py'
+      - 'tools/ecs-diagrams/src/maintenance-deployment.mjs'
+      - 'tools/ecs-diagrams/tests/maintenance-deployment.test.mjs'
   push:
     branches: [main]
     paths:
       - '.github/workflows/*pages.yml'
+      - '.github/workflows/architecture-build.yml'
       - 'scripts/*verify_pages.py'
+      - 'tools/ecs-diagrams/src/maintenance-deployment.mjs'
+      - 'tools/ecs-diagrams/tests/maintenance-deployment.test.mjs'
   workflow_dispatch:
 
 permissions:
@@ -25,3 +31,22 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -B -m unittest discover -s scripts -p test_verify_pages.py
+      - uses: actions/setup-node@main
+        with:
+          node-version: '24'
+      - run: node --test tools/ecs-diagrams/tests/maintenance-deployment.test.mjs
+      - name: Prepare a checked Pages directory with a hidden marker
+        run: |
+          mkdir -p tmp/test-pages/site
+          printf '<!doctype html><title>Pages</title>\n' > tmp/test-pages/site/index.html
+          touch tmp/test-pages/site/.nojekyll
+      - name: Upload the Pages test artifact
+        uses: actions/upload-pages-artifact@main
+        with:
+          name: pages-hidden-marker-test
+          path: tmp/test-pages/site
+          include-hidden-files: true
+      - name: Verify the Pages archive retains the marker
+        run: |
+          tar -tf "$RUNNER_TEMP/artifact.tar" > tmp/test-pages/entries.txt
+          grep -Fx './.nojekyll' tmp/test-pages/entries.txt

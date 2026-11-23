@@ -11,7 +11,7 @@ import { createVisualEdgeGroups, isVisibleRelation } from './architecture-visual
 
 export const ANALYSIS_MODEL = 'tmp/ecs-architecture/compiler/model.json';
 export const SOURCE_ROLE_LABELS = Object.freeze({
-  definition: '定义位置', registration: '注册位置', create: '创建位置', destroy: '销毁位置',
+  definition: '定义位置', registration: '注册位置', 'plugin-disable': '插件禁用位置', create: '创建位置', destroy: '销毁位置',
   initialize: '初始化位置', insert: '插入位置', remove: '移除位置', parameter: '参数位置',
   cleanup: '清理实现', message_definition: '消息类型定义', action_definition: '动作类型定义',
   build: '构建实现', install: '安装位置', assembly: '装配位置', run: '运行入口',
@@ -233,7 +233,7 @@ export function validateCompilerModel(model, { workspace, checkSources = true, m
     && Array.isArray(model.features) && Array.isArray(model.sourceFiles), 'Unsupported compiler architecture model');
   requireCondition(typeof model.compiler === 'string' && model.compiler && model.configuration != null, 'Missing compiler model provenance');
   requireCondition(model.inputs && /^[a-f0-9]{64}$/.test(model.inputs.sourceFingerprint), 'Missing compiler source fingerprint');
-  if (workspace) requireCondition(model.inputs.sourceFingerprint === sourceFingerprint(workspace), 'Compiler architecture source fingerprint is stale');
+  if (workspace) requireCondition(model.inputs.sourceFingerprint === sourceFingerprint(workspace, model.inputs.sourceInputs), 'Compiler architecture source fingerprint is stale');
   const features = new Set(), registry = new Map(), relations = new Set();
   for (const feature of model.features) {
     requireCondition(typeof feature.id === 'string' && feature.id && !features.has(feature.id)
@@ -352,7 +352,8 @@ export function viewerModel(model) {
 // 视觉类别只映射已给出的事实类型，不改变事实端点、方向或身份。
 export function presentRelation(relation) {
   const kind = ({ filter: 'reference', condition: 'reference', alternative: 'reference', event: 'observe', trigger: 'emit', mutable_access: 'write', insert: 'write', remove: 'write', initialize: 'write',
-    create: 'write', modify: 'write', despawn: 'write', publish: 'write', membership: 'registration', contains: 'reference' })[relation.kind] || relation.kind;
+    create: 'write', modify: 'write', despawn: 'write', publish: 'write', membership: 'registration', contains: 'reference',
+    plugin_group_member: 'reference', plugin_group_include: 'reference' })[relation.kind] || relation.kind;
   return kind === relation.kind ? { ...relation } : { ...relation, factKind: relation.kind, operation: relation.operation || relation.kind, kind };
 }
 

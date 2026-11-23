@@ -33,7 +33,7 @@ const compiled = await compileArchitectureArtifacts(views, registry);
 views = [...schedules.views, ...compiled.views];
 const artifactViews = views;
 // 编译期间源码发生变化时先中止，不删除或覆盖上一批正式图。
-if (sourceFingerprint(root) !== dump.manifest.sourceFingerprint) throw new Error('Source changed while building architecture; export schedules again');
+if (sourceFingerprint(root, dump.manifest.sourceInputs) !== dump.manifest.sourceFingerprint) throw new Error('Source changed while building architecture; export schedules again');
 const stagedArtifacts = fs.mkdtempSync(path.join(root, 'tmp/ecs-architecture/artifact-write-'));
 const writeArtifact = (filename, content) => writeTextArtifactSync(directory, stagedArtifacts, filename, content);
 function copyArtifact(filename, source, expectedSha256) {

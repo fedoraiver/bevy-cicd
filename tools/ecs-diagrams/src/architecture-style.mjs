@@ -110,6 +110,7 @@ function isEventIdentity(record) {
 export function edgeSemanticOf(link, registry) {
   const kind = link.factKind ?? link.operation ?? link.kind;
   if (directSemantics.has(kind)) return kind;
+  if (kind === 'plugin_group_member' || kind === 'plugin_group_include') return 'reference';
   const from = registry[link.from], to = registry[link.to];
   if (!from || !to) throw new Error(`Architecture edge endpoint missing: ${link.id || `${link.from} → ${link.to}`}`);
   if (factSemantics.has(kind)) return kind;

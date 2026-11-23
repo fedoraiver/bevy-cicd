@@ -3,6 +3,7 @@ pub mod entity_names;
 pub mod facts;
 pub mod named_fields;
 pub mod runtime;
+pub mod source_fingerprint;
 
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};

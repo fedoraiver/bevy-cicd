@@ -127,7 +127,7 @@ jobs:
         if: ${{ always() }}
         run: |
           mkdir -p project/tmp/ecs-architecture
-          node bevy-cicd/tools/ecs-diagrams/maintain.mjs report --format markdown > project/tmp/ecs-architecture/maintenance-summary.md
+          npm run --silent maintain --prefix bevy-cicd/tools/ecs-diagrams -- report --format markdown > project/tmp/ecs-architecture/maintenance-summary.md
           cat project/tmp/ecs-architecture/maintenance-summary.md | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Preserve extraction and rendering evidence
@@ -152,19 +152,23 @@ jobs:
             project/tmp/ecs-architecture/resource-time.txt
             project/tmp/ecs-architecture/routing/*-failed.json
             project/tmp/ecs-architecture/routing/*-failed.svg
-            project/tmp/ra/r/
+            bevy-cicd/tmp/ra/r/
+            project/logs/
 
       - name: Upload the validated Pages artifact
         uses: actions/upload-pages-artifact@main
         with:
           name: ${{ env.PAGES_ARTIFACT_NAME }}
           path: ${{ env.PAGES_DIR }}
+          include-hidden-files: true
           retention-days: 3
 
       - name: Upload publication proof
         uses: actions/upload-artifact@main
         with:
           name: ${{ env.PAGES_ARTIFACT_NAME }}-proof
-          path: ${{ env.PAGES_DIR }}/bevy-cicd-build.json
+          path: |
+            ${{ env.PAGES_DIR }}/bevy-cicd-build.json
+            ${{ env.PAGES_DIR }}/site-manifest.json
           if-no-files-found: error
           retention-days: 3

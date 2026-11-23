@@ -21,6 +21,7 @@ fn strings(value: &Value) -> BTreeSet<&str> {
 pub(crate) struct UnitGraph {
     units: Vec<Value>,
     classes: Vec<String>,
+    roots: Vec<usize>,
 }
 
 pub(crate) struct UnitQuery<'a> {
@@ -97,6 +98,50 @@ fn requires_rust_extern(unit: &Value) -> Result<bool> {
         .any(|kind| matches!(*kind, "lib" | "rlib" | "dylib" | "proc-macro")))
 }
 
+fn unit_edges(unit: &Value) -> impl Iterator<Item = &Value> {
+    // UnitGraph::parse 已验证依赖数组和索引。
+    unit["dependencies"].as_array().unwrap().iter()
+}
+
+fn unit_edge_index(edge: &Value) -> usize {
+    edge["index"].as_u64().unwrap() as usize
+}
+
+fn preserves_unit(
+    original: &UnitGraph,
+    baseline: usize,
+    overlay: &UnitGraph,
+    actual: usize,
+    matched: &mut BTreeMap<(usize, usize), bool>,
+) -> bool {
+    if let Some(result) = matched.get(&(baseline, actual)) {
+        return *result;
+    }
+    let left = &original.units[baseline];
+    let right = &overlay.units[actual];
+    let same_unit = ["pkg_id", "target", "platform", "mode"]
+        .into_iter()
+        .all(|field| left[field] == right[field]);
+    let preserved = same_unit
+        && strings(&left["features"]).is_subset(&strings(&right["features"]))
+        && unit_edges(left).all(|edge| {
+            unit_edges(right).any(|candidate| {
+                ["extern_crate_name", "public", "noprelude", "nounused"]
+                    .into_iter()
+                    .all(|field| edge[field] == candidate[field])
+                    && preserves_unit(
+                        original,
+                        unit_edge_index(edge),
+                        overlay,
+                        unit_edge_index(candidate),
+                        matched,
+                    )
+            })
+        });
+    matched.insert((baseline, actual), preserved);
+    preserved
+}
+
 impl UnitGraph {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let graph: Value = serde_json::from_slice(bytes).context("Invalid Cargo unit graph")?;
@@ -166,10 +211,50 @@ impl UnitGraph {
         for index in 0..units.len() {
             visit(index, &units, &mut hashes, &mut active)?;
         }
+        let roots = graph["roots"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|root| {
+                root.as_u64()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .filter(|index| *index < units.len())
+                    .context("Invalid Cargo unit graph root")
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             units,
             classes: hashes.into_iter().map(Option::unwrap).collect(),
+            roots,
         })
+    }
+
+    pub fn verify_launcher_caller(&self, original: &Self, caller_id: &str) -> Result<()> {
+        let [original_root] = original.roots.as_slice() else {
+            anyhow::bail!("Expected one native caller library root");
+        };
+        ensure!(
+            original.units[*original_root]["pkg_id"] == caller_id,
+            "Native caller library root has an unexpected package ID"
+        );
+        let [launcher_root] = self.roots.as_slice() else {
+            anyhow::bail!("Expected one native launcher root");
+        };
+        let caller_units: Vec<_> = unit_edges(&self.units[*launcher_root])
+            .filter(|edge| edge["extern_crate_name"] == "caller")
+            .map(unit_edge_index)
+            .collect();
+        let [caller_unit] = caller_units.as_slice() else {
+            anyhow::bail!("Expected one caller library dependency of the native launcher");
+        };
+        let mut matched = BTreeMap::new();
+        // cargo metadata 会合并其他工作区成员的 feature，并解析非原生平台的依赖。
+        // 在实际选中的库单元中逐条确认已锁定依赖，允许导出功能增加 feature 和边。
+        ensure!(
+            preserves_unit(original, *original_root, self, *caller_unit, &mut matched),
+            "Launcher resolution changed the caller's locked native dependency graph for {caller_id}"
+        );
+        Ok(())
     }
 
     fn matches(unit: &Value, query: &UnitQuery<'_>) -> bool {
@@ -323,6 +408,55 @@ mod tests {
             mode: "check",
         }
     }
+    #[test]
+    fn launcher_preserves_native_dependencies_and_permits_extra_export_edges() {
+        let edge = |index, name: &str| json!({"index":index,"extern_crate_name":name});
+        let source = json!({
+            "version":1,
+            "roots":[2],
+            "units":[
+                unit("build-dependency@1", json!([])),
+                unit("core-dependency@1", json!([edge(0, "build_dependency")])),
+                unit("caller-package", json!([edge(1, "core_dependency")])),
+            ]
+        });
+        let make_graph = |value| UnitGraph::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let original = make_graph(source);
+        let mut overlay = json!({
+            "version":1,
+            "roots":[0],
+            "units":[
+                unit("launcher", json!([edge(1, "caller"), edge(4, "exporter")])),
+                unit("caller-package", json!([edge(3, "core_dependency")])),
+                unit("build-dependency@1", json!([])),
+                unit("core-dependency@1", json!([edge(2, "build_dependency"), edge(4, "exporter")])),
+                unit("export-helper@1", json!([])),
+            ]
+        });
+        overlay["units"][3]["features"] = json!(["debug"]);
+        assert!(
+            make_graph(overlay.clone())
+                .verify_launcher_caller(&original, "caller-package")
+                .is_ok()
+        );
+        let mut version_changed = overlay.clone();
+        version_changed["units"][2]["pkg_id"] = json!("build-dependency@2");
+        assert!(
+            make_graph(version_changed)
+                .verify_launcher_caller(&original, "caller-package")
+                .is_err()
+        );
+        overlay["units"][3]["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        assert!(
+            make_graph(overlay)
+                .verify_launcher_caller(&original, "caller-package")
+                .is_err()
+        );
+    }
+
     #[test]
     fn graph_order_and_duplicate_projection_do_not_choose_a_harness() {
         let graph = json!({"version":1,"units":[unit("dep",json!([])),unit("root",json!([{"index":0,"extern_crate_name":"dep"}])),unit("root",json!([{"index":0,"extern_crate_name":"dep"}]))],"roots":[1,2]});

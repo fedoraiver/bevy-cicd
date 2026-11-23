@@ -5,6 +5,14 @@ import { NODE_STYLES, EDGE_STYLES, SELECTION_STYLE, EXTERNAL_REFERENCE_STYLE, se
 
 const registry = { movement: { kind: 'System' }, gravity: { kind: 'Resource' } };
 
+test('plugin group declarations use reference styling and preserve their labels', () => {
+  for (const [factKind, label] of [['plugin_group_member', '插件组成员声明'], ['plugin_group_include', '合并插件组声明']]) {
+    const link = { kind: 'reference', factKind, label };
+    assert.equal(edgeSemanticOf(link, {}), 'reference');
+    assert.equal(displayLabelOf(link, 'reference', {}), `引用 · ${label}`);
+  }
+});
+
 const approvedStyles = {
   system: ['System', 'rounded', '#3567A6'], observer: ['Observer', 'hex', '#7B4DB2'],
   entity: ['Entity', 'rounded', '#A6533B'], component: ['Component', 'rounded', '#4B8060'],
