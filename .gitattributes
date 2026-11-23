@@ -1,6 +1,6 @@
+* text=auto
 *.sh text eol=lf
 *.yml text eol=lf
-*.py text eol=lf
 
 # Preserve exported DOT and third-party license bytes as supplied.
 tools/ecs-diagrams/tests/fixtures/native-postupdate.dot -text diff whitespace=cr-at-eol,-blank-at-eol

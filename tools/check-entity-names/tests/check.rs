@@ -167,7 +167,7 @@ fn project_root() -> PathBuf {
 }
 
 fn seed_fixture_lock(root: &Path) {
-    let lock = project_root().join("tests/fixtures/bevy-rules/Cargo.lock");
+    let lock = project_root().join("examples/bevy-rules/Cargo.lock");
     fs::copy(lock, root.join("Cargo.lock")).unwrap();
 }
 

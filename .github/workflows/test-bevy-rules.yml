@@ -8,7 +8,7 @@ on:
       - '.github/workflows/test-bevy-rules.yml'
       - 'rust-toolchain.toml'
       - 'scripts/rustc-analysis.sh'
-      - 'tests/fixtures/bevy-rules/**'
+      - 'examples/bevy-rules/**'
       - 'tools/**'
   push:
     paths:
@@ -17,7 +17,7 @@ on:
       - '.github/workflows/test-bevy-rules.yml'
       - 'rust-toolchain.toml'
       - 'scripts/rustc-analysis.sh'
-      - 'tests/fixtures/bevy-rules/**'
+      - 'examples/bevy-rules/**'
       - 'tools/**'
   workflow_dispatch:
 
@@ -29,14 +29,14 @@ jobs:
     name: Check Rust with optional features
     uses: ./.github/workflows/rust-checks.yml
     with:
-      project-path: tests/fixtures/bevy-rules
+      project-path: examples/bevy-rules
       features: extra
 
   caller:
     name: Check a Bevy project
     uses: ./.github/workflows/bevy-rules.yml
     with:
-      package-path: tests/fixtures/bevy-rules
+      package-path: examples/bevy-rules
       features: extra
 
   regressions:
@@ -65,7 +65,7 @@ jobs:
       - name: Detect violations in a Bevy project
         shell: bash
         run: |
-          package="$GITHUB_WORKSPACE/tests/fixtures/bevy-rules"
+          package="$GITHUB_WORKSPACE/examples/bevy-rules"
           for rule in entity-names named-fields; do
             status=0
             output=$(bash scripts/rustc-analysis.sh check --rule "$rule" --workspace "$package" --features violations 2>&1) || status=$?

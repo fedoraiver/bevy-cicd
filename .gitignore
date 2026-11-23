@@ -1,4 +1,3 @@
 target/
-/tmp/
-/tools/ecs-diagrams/node_modules/
-__pycache__/
+tmp/
+tools/ecs-diagrams/node_modules/

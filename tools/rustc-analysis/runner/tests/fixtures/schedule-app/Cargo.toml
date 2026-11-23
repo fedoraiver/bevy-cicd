@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[workspace]
-resolver = "3"
-
 [package.metadata.bevy-architecture]
 app-factory = "build_app"
+
+[workspace]
+resolver = "3"
 
 [dependencies]
 bevy = { version = "=0.20.0", default-features = false, features = ["std"] }

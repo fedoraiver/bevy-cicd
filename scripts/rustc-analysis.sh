@@ -40,7 +40,7 @@ case "${1-}" in
     exec "$CARGO_TARGET_DIR/debug/rustc-analysis" "$@"
     ;;
   test)
-    cargo fetch --locked --manifest-path "$project_root/tests/fixtures/bevy-rules/Cargo.toml"
+    cargo fetch --locked --manifest-path "$project_root/examples/bevy-rules/Cargo.toml"
     cargo fetch --locked --manifest-path "$exporter_manifest"
     cargo fetch --locked --manifest-path "$project_root/tools/rustc-analysis/runner/tests/fixtures/schedule-app/Cargo.toml"
     build_tool
